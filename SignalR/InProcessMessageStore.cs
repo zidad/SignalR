@@ -79,12 +79,14 @@ namespace SignalR
                 id = 0;
             }
 
-            var items = keys.SelectMany(k => GetAllCore(k).Where(item => item.Id > id))
+            var items = keys.SelectMany(key => GetAllForKey(key)
+                            .TakeWhile(item => item.Id > id))
                             .OrderBy(item => item.Id);
 
-            return TaskAsyncHelper.FromResult<IOrderedEnumerable<Message>>(items);
+            return TaskAsyncHelper.FromResult(items);
         }
 
+        // Not used anymore
         public Task<IEnumerable<Message>> GetAllSince(string key, long id)
         {
             if (id > _lastMessageId)
@@ -92,7 +94,7 @@ namespace SignalR
                 id = 0;
             }
 
-            var items = GetAllCore(key).Where(item => item.Id > id)
+            var items = GetAllForKey(key).Where(item => item.Id > id)
                                        .OrderBy(item => item.Id);
 
             return TaskAsyncHelper.FromResult<IEnumerable<Message>>(items);
@@ -108,7 +110,7 @@ namespace SignalR
             return TaskAsyncHelper.FromResult<long?>(null);
         }
 
-        private IEnumerable<Message> GetAllCore(string key)
+        private IEnumerable<Message> GetAllForKey(string key)
         {
             SafeSet<Message> list;
             if (_items.TryGetValue(key, out list))

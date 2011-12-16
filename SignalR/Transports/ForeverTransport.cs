@@ -4,6 +4,8 @@ using System.Web;
 using SignalR.Infrastructure;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
 
 namespace SignalR.Transports
 {
@@ -141,6 +143,7 @@ namespace SignalR.Transports
                 Disconnected();
             }
             _disconnected = true;
+            
             _connection.SendCommand(
                 new SignalCommand
                 {
@@ -162,7 +165,7 @@ namespace SignalR.Transports
             // This forces the IIS compression module to leave this response alone.
             // If we don't do this, it will buffer the response to suit its own compression
             // logic, resulting in partial messages being sent to the client.
-            Context.Request.Headers.Remove("Accept-Encoding");
+            RemoveHeader((HttpWorkerRequest)Context.GetService(typeof(HttpWorkerRequest)));
 
             Context.Response.Buffer = false;
             Context.Response.BufferOutput = false;
@@ -170,6 +173,20 @@ namespace SignalR.Transports
             Context.Response.AddHeader("Connection", "keep-alive");
 
             return TaskAsyncHelper.Empty;
+        }
+
+        private delegate void RemoveHeaderDel(HttpWorkerRequest wr);
+        private static readonly RemoveHeaderDel RemoveHeader = GetRemoveHeaderDel();
+
+        private static RemoveHeaderDel GetRemoveHeaderDel()
+        {
+            var iis7wrType = typeof(HttpContext).Assembly.GetType("System.Web.Hosting.IIS7WorkerRequest");
+            var mi = iis7wrType.GetMethod("SetKnownRequestHeader", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            var wrParamExpr = Expression.Parameter(typeof(HttpWorkerRequest));
+            var iis7wrParamExpr = Expression.Convert(wrParamExpr, iis7wrType);
+            var callExpr = Expression.Call(iis7wrParamExpr, mi, Expression.Constant(HttpWorkerRequest.HeaderAcceptEncoding), Expression.Constant(null, typeof(string)), Expression.Constant(false));
+            return Expression.Lambda<RemoveHeaderDel>(callExpr, wrParamExpr).Compile();
         }
 
         private void ProcessSendRequest()
@@ -194,6 +211,13 @@ namespace SignalR.Transports
 
         private Task ProcessMessages(IReceivingConnection connection, long? lastMessageId)
         {
+            var tcs = new TaskCompletionSource<object>();
+            ProcessMessagesImpl(tcs, connection, lastMessageId);
+            return tcs.Task;
+        }
+
+        private void ProcessMessagesImpl(TaskCompletionSource<object> taskCompletetionSource, IReceivingConnection connection, long? lastMessageId)
+        {
             if (!_disconnected && Context.Response.IsClientConnected)
             {
                 // ResponseTask will either subscribe and wait for a signal then return new messages,
@@ -202,24 +226,75 @@ namespace SignalR.Transports
                     ? connection.ReceiveAsync()
                     : connection.ReceiveAsync(lastMessageId.Value);
 
-                return receiveAsyncTask.Then(response =>
+                receiveAsyncTask.Then(response =>
                 {
                     LastMessageId = response.MessageId;
                     // If the response has the Disconnect flag, just send the response and exit the loop,
                     // the server thinks connection is gone. Otherwse, send the response then re-enter the loop
-                    return response.Disconnect
-                        ? Send(response)
-                        : Send(response)
-                            .Then((c, id) => ProcessMessages(c, id), connection, LastMessageId)
-                            .FastUnwrap();
-                }).FastUnwrap();
+                    Task sendTask = Send(response);
+                    if (response.Disconnect)
+                    {
+                        // Signal the tcs when the task is done
+                        return sendTask.Then(tcs => tcs.SetResult(null), taskCompletetionSource);
+                    }
+
+                    // Continue the receive loop
+                    return sendTask.Then((conn, id) => ProcessMessagesImpl(taskCompletetionSource, conn, id), connection, LastMessageId);
+                })
+                .FastUnwrap().ContinueWith(t =>
+                {
+                    if (t.IsCanceled)
+                    {
+                        taskCompletetionSource.SetCanceled();
+                    }
+                    else if (t.IsFaulted)
+                    {
+                        taskCompletetionSource.SetException(t.Exception);
+                    }
+                },
+                TaskContinuationOptions.ExecuteSynchronously &
+                TaskContinuationOptions.NotOnRanToCompletion);
+
+                // Stop execution here
+                return;
             }
 
             // Client is no longer connected
             Disconnect();
 
-            // Nothing to do, return empty task to force the request to end
-            return TaskAsyncHelper.Empty;
+            // We're done
+            taskCompletetionSource.SetResult(null);
+            return;
         }
+
+        //private Task ProcessMessages(IReceivingConnection connection, long? lastMessageId)
+        //{
+        //    if (!_disconnected && Context.Response.IsClientConnected)
+        //    {
+        //        // ResponseTask will either subscribe and wait for a signal then return new messages,
+        //        // or return immediately with messages that were pending
+        //        var receiveAsyncTask = lastMessageId == null
+        //            ? connection.ReceiveAsync()
+        //            : connection.ReceiveAsync(lastMessageId.Value);
+
+        //        return receiveAsyncTask.Then(response =>
+        //        {
+        //            LastMessageId = response.MessageId;
+        //            // If the response has the Disconnect flag, just send the response and exit the loop,
+        //            // the server thinks connection is gone. Otherwse, send the response then re-enter the loop
+        //            return response.Disconnect
+        //                ? Send(response)
+        //                : Send(response)
+        //                    .Then((c, id) => ProcessMessages(c, id), connection, LastMessageId)
+        //                    .FastUnwrap();
+        //        }).FastUnwrap();
+        //    }
+
+        //    // Client is no longer connected
+        //    Disconnect();
+
+        //    // Nothing to do, return empty task to force the request to end
+        //    return TaskAsyncHelper.Empty;
+        //}
     }
 }

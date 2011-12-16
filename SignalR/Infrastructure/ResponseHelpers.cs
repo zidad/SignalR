@@ -11,7 +11,9 @@ namespace SignalR.Infrastructure
         {
             // The OutputStream on HttpResponse/HttpReponseBase does not implement a true async write,
             // so we're just going to do it sync and return an Empty task here.
-            response.Write(s);
+            //response.Write(s);
+            var bytes = Encoding.UTF8.GetBytes(s);
+            response.OutputStream.Write(bytes, 0, bytes.Length);
             return TaskAsyncHelper.Empty;
         }
     }

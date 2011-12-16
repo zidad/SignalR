@@ -7,6 +7,7 @@ namespace SignalR.Infrastructure
     internal class SafeSet<T>
     {
         private readonly ConcurrentDictionary<T, object> _items;
+        private readonly CustomStack<T> _allKeys = new CustomStack<T>();
 
         public SafeSet()
         {
@@ -26,12 +27,14 @@ namespace SignalR.Infrastructure
         public IEnumerable<T> GetSnapshot()
         {
             // The Keys property locks, so Select instead
-            return _items.Select(item => item.Key);
+            // return _items.Select(item => item.Key);
+            return _allKeys.GetAll();
         }
 
         public void Add(T item)
         {
             _items.TryAdd(item, null);
+            _allKeys.Add(item);
         }
 
         public void Remove(T item)
@@ -40,14 +43,9 @@ namespace SignalR.Infrastructure
             _items.TryRemove(item, out _);
         }
 
-        public bool Any()
-        {
-            return _items.Any();
-        }
-
         public long Count
         {
-            get { return _items.Count; }
+            get { return _allKeys.Count; }
         }
     }
 }

@@ -60,6 +60,12 @@ namespace SignalR.Transports
             return TaskAsyncHelper.Empty;
         }
 
+        public override Task Send(object value)
+        {
+            var data = JsonSerializer.Stringify(value);
+            return Context.Response.WriteAsync(data);
+        }
+
         protected override Task InitializeResponse(IReceivingConnection connection)
         {
             return base.InitializeResponse(connection)

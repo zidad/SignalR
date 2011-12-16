@@ -98,6 +98,7 @@ namespace SignalR
 
             Connection = CreateConnection(connectionId, groups, context);
 
+            // TODO: Move these closures to a separate method so that negotiate requests don't require the delegate allocation
             // Wire up the events we need
             _transport.Connected += () =>
             {

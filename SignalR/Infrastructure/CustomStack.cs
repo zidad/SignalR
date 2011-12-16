@@ -20,7 +20,7 @@ namespace SignalR.Infrastructure
 
                 if (fieldValueDuringInterlocked == lastReadFieldValue)
                 {
-                    // We successfully updated the field value during this iteration, so there is no more work to do. 
+                    // We successfully updated the field value during this iteration, so there is no more work to do.
                     return;
                 }
                 else
@@ -28,6 +28,19 @@ namespace SignalR.Infrastructure
                     // Otherwise, another thread updated the field before we did, so we need to retry. 
                     lastReadFieldValue = fieldValueDuringInterlocked;
                 }
+            }
+        }
+
+        public int Count
+        {
+            get { return _node != null ? _node.Remaining : 0; }
+        }
+
+        public IEnumerable<T> GetAll()
+        {
+            for (Node thisNode = _node; thisNode != null; thisNode = thisNode.Next)
+            {
+                yield return thisNode.Value;
             }
         }
 
