@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Diagnostics;
+using System.ServiceModel;
 using System.Threading.Tasks;
+using System.Web.Http.SelfHost;
+using SignalR.Hosting.WebApi;
 using SignalR.Samples.Raw;
 
 namespace SignalR.Hosting.Self.Samples
@@ -12,6 +15,28 @@ namespace SignalR.Hosting.Self.Samples
             Debug.Listeners.Add(new ConsoleTraceListener());
             Debug.AutoFlush = true;
 
+            //DefaultSelfHost();
+
+            WebApiSelfHost();
+
+            Console.ReadKey();
+        }
+
+        private static void WebApiSelfHost()
+        {
+            var config = new HttpSelfHostConfiguration("http://localhost:8081");
+            config.TransferMode = TransferMode.StreamedResponse;
+            config.Routes.MapConnection<MyConnection>("Echo", "echo/{*operation}");
+            config.Routes.MapConnection<Raw>("Raw", "raw/{*operation}");
+
+            var dispatcher = new PersistentConnectionDispatcher(config);
+
+            var server = new HttpSelfHostServer(config, dispatcher);
+            server.OpenAsync().Wait();
+        }
+
+        private static void DefaultSelfHost()
+        {
             string url = "http://*:8081/";
             var server = new Server(url);
 
@@ -23,8 +48,6 @@ namespace SignalR.Hosting.Self.Samples
             server.Start();
 
             Console.WriteLine("Server running on {0}", url);
-
-            Console.ReadKey();
         }
 
         public class MyConnection : PersistentConnection
