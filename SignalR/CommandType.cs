@@ -4,6 +4,7 @@
     {
         AddToGroup,
         RemoveFromGroup,
+        ForgetConnection,
         Disconnect
     }
 }

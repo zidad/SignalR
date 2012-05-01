@@ -105,6 +105,16 @@ namespace SignalR
             Connection = connection;
             Groups = new GroupManager(connection, DefaultSignal);
 
+            _transport.TransportConnected = () =>
+            {
+                var command = new SignalCommand
+                {
+                    Type = CommandType.ForgetConnection,
+                    Value = connectionId
+                };
+                return _messageBus.Send(connectionId, "__SpecialServerStuff__", command);
+            };
+
             _transport.Connected = () =>
             {
                 return OnConnectedAsync(context.Request, connectionId);
