@@ -42,12 +42,7 @@
                 if (shouldSubscribe) {
                     // We want to subscribe to the hub events
                     subscriptionMethod = hub.on;
-<<<<<<< HEAD
-                }
-                else {
-=======
                 } else {
->>>>>>> upstream/master
                     // We want to unsubscribe from the hub events
                     subscriptionMethod = hub.off;
                 }
@@ -69,30 +64,18 @@
         }
     }
 
-<<<<<<< HEAD
-    signalR.hub = $.hubConnection("{serviceUrl}", { useDefaultPath: false })
-        .starting(function () {
-            // Register the hub proxies as subscribed
-            // (instance, shouldSubscribe)
-            registerHubProxies(signalR, true);
-=======
     $.hubConnection.prototype.createHubProxies = function () {
         var proxies = {};
         this.starting(function () {
             // Register the hub proxies as subscribed
             // (instance, shouldSubscribe)
             registerHubProxies(proxies, true);
->>>>>>> upstream/master
 
             this._registerSubscribedHubs();
         }).disconnected(function () {
             // Unsubscribe all hub proxies when we "disconnect".  This is to ensure that we do not re-add functional call backs.
             // (instance, shouldSubscribe)
-<<<<<<< HEAD
-            registerHubProxies(signalR, false);
-=======
             registerHubProxies(proxies, false);
->>>>>>> upstream/master
         });
 
     /*hubs*/
