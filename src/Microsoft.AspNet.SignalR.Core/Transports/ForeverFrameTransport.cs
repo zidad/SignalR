@@ -1,12 +1,18 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
-using System.Diagnostics;
+using System;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Hosting;
+using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Json;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
+    [SuppressMessage("Microsoft.Design", "CA1001:TypesThatOwnDisposableFieldsShouldBeDisposable", Justification = "Disposable fields are disposed from a different method")]
     public class ForeverFrameTransport : ForeverTransport
     {
         private const string _initPrefix = "<!DOCTYPE html>" +
@@ -24,92 +30,160 @@ namespace Microsoft.AspNet.SignalR.Transports
                                             "</script></head>" +
                                             "<body>\r\n";
 
-        private readonly bool _isDebug;
+        private HTMLTextWriter _htmlOutputWriter;
 
         public ForeverFrameTransport(HostContext context, IDependencyResolver resolver)
             : base(context, resolver)
         {
-            _isDebug = context.IsDebuggingEnabled();
+        }
+
+        /// <summary>
+        /// Pointed to the HTMLOutputWriter to wrap output stream with an HTML friendly one
+        /// </summary>
+        public override TextWriter OutputWriter
+        {
+            get
+            {
+                return HTMLOutputWriter;
+            }
+        }
+
+        private HTMLTextWriter HTMLOutputWriter
+        {
+            get
+            {
+                if (_htmlOutputWriter == null)
+                {
+                    _htmlOutputWriter = new HTMLTextWriter(Context.Response);
+                    _htmlOutputWriter.NewLine = "\n";
+                }
+
+                return _htmlOutputWriter;
+            }
         }
 
         public override Task KeepAlive()
         {
-            return EnqueueOperation(() =>
+            if (InitializeTcs == null || !InitializeTcs.Task.IsCompleted)
             {
-                OutputWriter.Write("<script>r(c, {});</script>");
-                OutputWriter.WriteLine();
-                OutputWriter.WriteLine();
-                OutputWriter.Flush();
+                return TaskAsyncHelper.Empty;
+            }
 
-                return Context.Response.FlushAsync();
-            });
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return EnqueueOperation(state => PerformKeepAlive(state), this);
         }
 
         public override Task Send(PersistentResponse response)
         {
             OnSendingResponse(response);
 
-            return EnqueueOperation(() =>
-            {
-                OutputWriter.Write("<script>r(c, ");
-                JsonSerializer.Serialize(response, OutputWriter);
-                OutputWriter.Write(");</script>\r\n");
-                OutputWriter.Flush();
+            var context = new ForeverFrameTransportContext(this, response);
 
-                return Context.Response.FlushAsync().Catch(IncrementErrorCounters);
-            });
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return EnqueueOperation(s => PerformSend(s), context);
         }
 
-        protected override Task InitializeResponse(ITransportConnection connection)
+        protected internal override Task InitializeResponse(ITransportConnection connection)
         {
-            return base.InitializeResponse(connection)
-                .Then(initScript =>
-                {
-                    Context.Response.ContentType = "text/html";
-
-                    return EnqueueOperation(() =>
-                    {
-                        OutputWriter.Write(initScript);
-                        OutputWriter.Flush();
-
-                        return Context.Response.FlushAsync();
-                    });
-                },
-                _initPrefix + Context.Request.QueryString["frameId"] + _initSuffix);
-        }
-
-        private class TextWriterWrapper : TextWriter
-        {
-            private readonly TextWriter _writer;
-
-            public TextWriterWrapper(TextWriter writer)
+            uint frameId;
+            string rawFrameId = Context.Request.QueryString["frameId"];
+            if (String.IsNullOrWhiteSpace(rawFrameId) || !UInt32.TryParse(rawFrameId, NumberStyles.None, CultureInfo.InvariantCulture, out frameId))
             {
-                _writer = writer;
+                // Invalid frameId passed in
+                throw new InvalidOperationException(Resources.Error_InvalidForeverFrameId);
             }
 
-            public override Encoding Encoding
+            string initScript = _initPrefix +
+                                frameId.ToString(CultureInfo.InvariantCulture) +
+                                _initSuffix;
+
+            var context = new ForeverFrameTransportContext(this, initScript);
+
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return base.InitializeResponse(connection).Then(s => Initialize(s), context);
+        }
+
+        private static Task Initialize(object state)
+        {
+            var context = (ForeverFrameTransportContext)state;
+
+            var initContext = new ForeverFrameTransportContext(context.Transport, context.State);
+
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return WriteInit(initContext);
+        }
+
+        private static Task WriteInit(ForeverFrameTransportContext context)
+        {
+            context.Transport.Context.Response.ContentType = "text/html; charset=UTF-8";
+
+            context.Transport.HTMLOutputWriter.WriteRaw((string)context.State);
+            context.Transport.HTMLOutputWriter.Flush();
+
+            return context.Transport.Context.Response.Flush();
+        }
+
+        private static Task PerformSend(object state)
+        {
+            var context = (ForeverFrameTransportContext)state;
+
+            context.Transport.HTMLOutputWriter.WriteRaw("<script>r(c, ");
+            context.Transport.JsonSerializer.Serialize(context.State, context.Transport.HTMLOutputWriter);
+            context.Transport.HTMLOutputWriter.WriteRaw(");</script>\r\n");
+            context.Transport.HTMLOutputWriter.Flush();
+
+            return context.Transport.Context.Response.Flush();
+        }
+
+        private static Task PerformKeepAlive(object state)
+        {
+            var transport = (ForeverFrameTransport)state;
+
+            transport.HTMLOutputWriter.WriteRaw("<script>r(c, {});</script>");
+            transport.HTMLOutputWriter.WriteLine();
+            transport.HTMLOutputWriter.WriteLine();
+            transport.HTMLOutputWriter.Flush();
+
+            return transport.Context.Response.Flush();
+        }
+
+        private class ForeverFrameTransportContext
+        {
+            public ForeverFrameTransport Transport;
+            public object State;
+
+            public ForeverFrameTransportContext(ForeverFrameTransport transport, object state)
             {
-                get { return _writer.Encoding; }
+                Transport = transport;
+                State = state;
+            }
+        }
+
+        private class HTMLTextWriter : BufferTextWriter
+        {
+            public HTMLTextWriter(IResponse response)
+                : base(response)
+            {
+            }
+
+            public void WriteRaw(string value)
+            {
+                base.Write(value);
             }
 
             public override void Write(string value)
             {
-                _writer.Write(EscapeAnyInlineScriptTags(value));
+                base.Write(JavascriptEncode(value));
             }
 
             public override void WriteLine(string value)
             {
-                _writer.Write(EscapeAnyInlineScriptTags(value));
+                base.WriteLine(JavascriptEncode(value));
             }
 
-            public override void WriteLine()
+            private static string JavascriptEncode(string input)
             {
-                _writer.WriteLine();
-            }
-
-            private static string EscapeAnyInlineScriptTags(string input)
-            {
-                return input.Replace("</script>", "</\"+\"script>");
+                return input.Replace("<", "\\u003c").Replace(">", "\\u003e");
             }
         }
     }

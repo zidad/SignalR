@@ -1,10 +1,13 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
+using System.Globalization;
 using Microsoft.AspNet.SignalR.Client.Infrastructure;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Client
 {
+#if !PORTABLE
     public class ObservableConnection<T> : IObservable<T>
     {
         private readonly Connection _connection;
@@ -19,7 +22,7 @@ namespace Microsoft.AspNet.SignalR.Client
 
             if (convert == null)
             {
-                throw new ArgumentNullException("converter");
+                throw new ArgumentNullException("convert");
             }
 
             _convert = convert;
@@ -55,4 +58,5 @@ namespace Microsoft.AspNet.SignalR.Client
             });
         }
     }
+#endif
 }

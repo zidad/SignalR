@@ -3,23 +3,25 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
     /// <summary>
     /// Encapsulates all information about an individual SignalR connection for an <see cref="IHub"/>.
     /// </summary>
-    public class HubConnectionContext : IHubConnectionContext
+    public class HubConnectionContext : HubConnectionContextBase, IHubCallerConnectionContext
     {
-        private readonly string _hubName;
         private readonly string _connectionId;
-        private readonly Func<string, ClientHubInvocation, IEnumerable<string>, Task> _send;
-
+        
         /// <summary>
         /// Initializes a new instance of the <see cref="HubConnectionContext"/>.
         /// </summary>
         public HubConnectionContext()
         {
+            All = new NullClientProxy();
+            Others = new NullClientProxy();
+            Caller = new NullClientProxy();
         }
 
         /// <summary>
@@ -29,22 +31,16 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <param name="connection">The connection.</param>
         /// <param name="hubName">The hub name.</param>
         /// <param name="connectionId">The connection id.</param>
-        /// <param name="state">The connection hub state.</param>
-        public HubConnectionContext(IHubPipelineInvoker pipelineInvoker, IConnection connection, string hubName, string connectionId, TrackingDictionary state)
+        /// <param name="tracker">The connection hub state.</param>
+        public HubConnectionContext(IHubPipelineInvoker pipelineInvoker, IConnection connection, string hubName, string connectionId, StateChangeTracker tracker)
+            : base(connection, pipelineInvoker, hubName)
         {
-            _send = (signal, invocation, exclude) => pipelineInvoker.Send(new HubOutgoingInvokerContext(connection, signal, invocation, exclude));
             _connectionId = connectionId;
-            _hubName = hubName;
 
-            Caller = new StatefulSignalProxy(_send, connectionId, hubName, state);
+            Caller = new StatefulSignalProxy(connection, pipelineInvoker, connectionId, PrefixHelper.HubConnectionIdPrefix, hubName, tracker);
             All = AllExcept();
             Others = AllExcept(connectionId);
         }
-
-        /// <summary>
-        /// All connected clients.
-        /// </summary>
-        public dynamic All { get; set; }
 
         /// <summary>
         /// All connected clients except the calling client.
@@ -57,17 +53,6 @@ namespace Microsoft.AspNet.SignalR.Hubs
         public dynamic Caller { get; set; }
 
         /// <summary>
-        /// Returns a dynamic representation of all clients except the calling client ones specified.
-        /// </summary>
-        /// <param name="exclude">A list of connection ids to exclude.</param>
-        /// <returns>A dynamic representation of all clients except the calling client ones specified.</returns>
-        public dynamic AllExcept(params string[] exclude)
-        {
-            // REVIEW: Should this method be params array?
-            return new ClientProxy(_send, _hubName, exclude);
-        }
-
-        /// <summary>
         /// Returns a dynamic representation of all clients in a group except the calling client.
         /// </summary>
         /// <param name="groupName">The name of the group</param>
@@ -78,24 +63,13 @@ namespace Microsoft.AspNet.SignalR.Hubs
         }
 
         /// <summary>
-        /// Returns a dynamic representation of the specified group.
+        /// Returns a dynamic representation of all clients in the specified groups except the calling client.
         /// </summary>
-        /// <param name="groupName">The name of the group</param>
-        /// <param name="exclude">A list of connection ids to exclude.</param>
-        /// <returns>A dynamic representation of the specified group.</returns>
-        public dynamic Group(string groupName, params string[] exclude)
+        /// <param name="groupNames">The name of the groups</param>
+        /// <returns>A dynamic representation of all clients in a group except the calling client.</returns>
+        public dynamic OthersInGroups(IList<string> groupNames)
         {
-            return new SignalProxy(_send, groupName, _hubName, exclude);
-        }
-
-        /// <summary>
-        /// Returns a dynamic representation of the connection with the specified connectionid.
-        /// </summary>
-        /// <param name="connectionId">The connection id</param>
-        /// <returns>A dynamic representation of the specified client.</returns>
-        public dynamic Client(string connectionId)
-        {
-            return new SignalProxy(_send, connectionId, _hubName);
+            return Groups(groupNames, _connectionId);
         }
     }
 }

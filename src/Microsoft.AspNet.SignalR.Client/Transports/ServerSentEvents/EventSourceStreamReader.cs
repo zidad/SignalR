@@ -1,11 +1,7 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
-using System.Diagnostics;
 using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
 {
@@ -13,26 +9,10 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
     /// Event source implementation for .NET. This isn't to the spec but it's enough to support SignalR's
     /// server.
     /// </summary>
-    public class EventSourceStreamReader
+    public class EventSourceStreamReader : AsyncStreamReader
     {
-        private readonly Stream _stream;
         private readonly ChunkBuffer _buffer;
-        private readonly object _bufferLock = new object();
-        private byte[] _readBuffer;
-
-
-        private int _reading;
-        private Action _setOpened;
-
-        /// <summary>
-        /// Invoked when the connection is open.
-        /// </summary>
-        public Action Opened { get; set; }
-
-        /// <summary>
-        /// Invoked when the connection is closed.
-        /// </summary>
-        public Action<Exception> Closed { get; set; }
+        private readonly IConnection _connection;
 
         /// <summary>
         /// Invoked when there's a message if received in the stream.
@@ -42,128 +22,22 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
         /// <summary>
         /// Initializes a new instance of the <see cref="EventSourceStreamReader"/> class.
         /// </summary>
+        /// <param name="connection">The connection associated with this event source</param>
         /// <param name="stream">The stream to read event source payloads from.</param>
-        public EventSourceStreamReader(Stream stream)
+        public EventSourceStreamReader(IConnection connection, Stream stream)
+            : base(stream)
         {
-            _stream = stream;
+            _connection = connection;
             _buffer = new ChunkBuffer();
+
+            Data = ProcessBuffer;
         }
 
-        private bool Processing
+        private void ProcessBuffer(ArraySegment<byte> readBuffer)
         {
-            get
+            lock (BufferLock)
             {
-                return _reading == 1;
-            }
-        }
-
-        /// <summary>
-        /// Starts the reader.
-        /// </summary>
-        public void Start()
-        {
-            if (Interlocked.Exchange(ref _reading, 1) == 0)
-            {
-                _setOpened = () =>
-                {
-                    Debug.WriteLine("EventSourceReader: Connection Opened");
-                    OnOpened();
-                };
-
-                if (_readBuffer == null)
-                {
-                    _readBuffer = new byte[4096];
-                }
-
-                // Start the process loop
-                Process();
-            }
-        }
-
-        /// <summary>
-        /// Closes the connection and the underlying stream.
-        /// </summary>
-        public void Close()
-        {
-            Close(exception: null);
-        }
-
-        private void Process()
-        {
-        Read:
-
-            if (!Processing)
-            {
-                return;
-            }
-
-            Task<int> readTask = _stream.ReadAsync(_readBuffer);
-
-            if (readTask.IsCompleted)
-            {
-                try
-                {
-                    // Observe all exceptions
-                    readTask.Wait();
-
-                    int read = readTask.Result;
-
-                    if (TryProcessRead(read))
-                    {
-                        goto Read;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Close(ex);
-                }
-            }
-            else
-            {
-                ReadAsync(readTask);
-            }
-        }
-
-        private void ReadAsync(Task<int> readTask)
-        {
-            readTask.Catch(ex => Close(ex))
-                    .Then(read =>
-                    {
-                        if (TryProcessRead(read))
-                        {
-                            Process();
-                        }
-                    })
-                    .Catch();
-        }
-
-        private bool TryProcessRead(int read)
-        {
-            Interlocked.Exchange(ref _setOpened, () => { }).Invoke();
-
-            if (read > 0)
-            {
-                // Put chunks in the buffer
-                ProcessBuffer(read);
-
-                return true;
-            }
-            else if (read == 0)
-            {
-                Close();
-            }
-
-            return false;
-        }
-
-        private void ProcessBuffer(int read)
-        {
-            lock (_bufferLock)
-            {
-                if (_readBuffer != null)
-                {
-                    _buffer.Add(_readBuffer, read);
-                }
+                _buffer.Add(readBuffer);
 
                 while (_buffer.HasChunks)
                 {
@@ -181,41 +55,10 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
                         continue;
                     }
 
-                    Debug.WriteLine("SSE READ: " + sseEvent);
+                    _connection.Trace(TraceLevels.Messages, "SSE: OnMessage({0})", sseEvent);
 
                     OnMessage(sseEvent);
                 }
-            }
-        }
-
-        private void Close(Exception exception)
-        {
-            if (Interlocked.Exchange(ref _reading, 0) == 1)
-            {
-                Debug.WriteLine("EventSourceReader: Connection Closed");
-                if (Closed != null)
-                {
-                    if (exception != null)
-                    {
-                        exception = exception.Unwrap();
-                    }
-
-                    Closed(exception);
-                }
-
-                lock (_bufferLock)
-                {
-                    // Release the buffer
-                    _readBuffer = null;
-                }
-            }
-        }
-
-        private void OnOpened()
-        {
-            if (Opened != null)
-            {
-                Opened();
             }
         }
 

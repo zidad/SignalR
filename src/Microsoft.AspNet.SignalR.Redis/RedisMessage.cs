@@ -1,33 +1,76 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Text;
-using Newtonsoft.Json;
+using Microsoft.AspNet.SignalR.Messaging;
 
 namespace Microsoft.AspNet.SignalR.Redis
 {
-    [Serializable]
     public class RedisMessage
     {
-        public RedisMessage(long id, Message[] message)
+        public ulong Id { get; private set; }
+        public ScaleoutMessage ScaleoutMessage { get; private set; }
+
+        public static byte[] ToBytes(IList<Message> messages)
         {
-            Id = id;
-            Messages = message;
+            if (messages == null)
+            {
+                throw new ArgumentNullException("messages");
+            }
+
+            using (var ms = new MemoryStream())
+            {
+                var binaryWriter = new BinaryWriter(ms);
+
+                var scaleoutMessage = new ScaleoutMessage(messages);
+                var buffer = scaleoutMessage.ToBytes();
+
+                binaryWriter.Write(buffer.Length);
+                binaryWriter.Write(buffer);
+
+                return ms.ToArray();
+            }
         }
 
-        public long Id { get; set; }
-        public Message[] Messages { get; set; }
-
-        public byte[] GetBytes()
+        public static RedisMessage FromBytes(byte[] data)
         {
-            var s = JsonConvert.SerializeObject(this);
-            return Encoding.UTF8.GetBytes(s);
-        }
+            using (var stream = new MemoryStream(data))
+            {
+                var message = new RedisMessage();
 
-        public static RedisMessage Deserialize(byte[] data)
-        {
-            var s = Encoding.UTF8.GetString(data);
-            return JsonConvert.DeserializeObject<RedisMessage>(s);
+                // read message id from memory stream until SPACE character
+                var messageIdBuilder = new StringBuilder(20);
+                do
+                {
+                    // it is safe to read digits as bytes because they encoded by single byte in UTF-8
+                    int charCode = stream.ReadByte();
+                    if (charCode == -1)
+                    {
+                        throw new EndOfStreamException();
+                    }
+                    char c = (char)charCode;
+                    if (c == ' ')
+                    {
+                        message.Id = ulong.Parse(messageIdBuilder.ToString(), CultureInfo.InvariantCulture);
+                        messageIdBuilder = null;
+                    }
+                    else
+                    {
+                        messageIdBuilder.Append(c);
+                    }
+                }
+                while (messageIdBuilder != null);
+
+                var binaryReader = new BinaryReader(stream);
+                int count = binaryReader.ReadInt32();
+                byte[] buffer = binaryReader.ReadBytes(count);
+
+                message.ScaleoutMessage = ScaleoutMessage.FromBytes(buffer);
+                return message;
+            }
         }
     }
 }

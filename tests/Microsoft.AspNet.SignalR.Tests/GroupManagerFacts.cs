@@ -1,5 +1,6 @@
 ﻿using System;
-using System.Linq;
+using System.Collections.Generic;
+using Microsoft.AspNet.SignalR.Messaging;
 using Moq;
 using Xunit;
 
@@ -47,12 +48,12 @@ namespace Microsoft.AspNet.SignalR.Tests
                 connection.Setup(m => m.Send(It.IsAny<ConnectionMessage>()))
                           .Callback<ConnectionMessage>(m =>
                           {
-                              Assert.Equal("1", m.Signal);
+                              Assert.Equal("c-1", m.Signal);
                               Assert.NotNull(m.Value);
                               var command = m.Value as Command;
                               Assert.NotNull(command);
                               Assert.NotNull(command.Id);
-                              Assert.Equal(CommandType.AddToGroup, command.Type);
+                              Assert.Equal(CommandType.AddToGroup, command.CommandType);
                               Assert.Equal("Prefix.MyGroup", command.Value);
                               Assert.True(command.WaitForAck);
                           });
@@ -98,12 +99,12 @@ namespace Microsoft.AspNet.SignalR.Tests
                 connection.Setup(m => m.Send(It.IsAny<ConnectionMessage>()))
                           .Callback<ConnectionMessage>(m =>
                           {
-                              Assert.Equal("1", m.Signal);
+                              Assert.Equal("c-1", m.Signal);
                               Assert.NotNull(m.Value);
                               var command = m.Value as Command;
                               Assert.NotNull(command);
                               Assert.NotNull(command.Id);
-                              Assert.Equal(CommandType.RemoveFromGroup, command.Type);
+                              Assert.Equal(CommandType.RemoveFromGroup, command.CommandType);
                               Assert.Equal("Prefix.MyGroup", command.Value);
                               Assert.True(command.WaitForAck);
                           });
@@ -126,7 +127,19 @@ namespace Microsoft.AspNet.SignalR.Tests
                 var groupManager = new GroupManager(connection.Object, "Prefix");
 
                 // Assert
-                Assert.Throws<ArgumentNullException>(() => groupManager.Send(null, "Way"));
+                Assert.Throws<ArgumentException>(() => groupManager.Send((string)null, "Way"));
+            }
+
+            [Fact]
+            public void ThrowsIfGroupsIsNull()
+            {
+                // Arrange
+                var connection = new Mock<IConnection>();
+                connection.Setup(m => m.Send(It.IsAny<ConnectionMessage>()));
+                var groupManager = new GroupManager(connection.Object, "Prefix");
+
+                // Assert
+                Assert.Throws<ArgumentNullException>(() => groupManager.Send((IList<string>)null, "Way"));
             }
 
             [Fact]
@@ -139,8 +152,8 @@ namespace Microsoft.AspNet.SignalR.Tests
                           {
                               Assert.Equal("Prefix.MyGroup", m.Signal);
                               Assert.Equal("some value", m.Value);
-                              Assert.True(m.ExcludedSignals.Contains("x"));
-                              Assert.True(m.ExcludedSignals.Contains("y"));
+                              Assert.True(m.ExcludedSignals.Contains("c-x"));
+                              Assert.True(m.ExcludedSignals.Contains("c-y"));
                           });
 
                 var groupManager = new GroupManager(connection.Object, "Prefix");

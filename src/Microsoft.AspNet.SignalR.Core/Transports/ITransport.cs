@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
@@ -37,14 +38,9 @@ namespace Microsoft.AspNet.SignalR.Transports
         Func<Task> Disconnected { get; set; }
 
         /// <summary>
-        /// Gets the connection id for the transport.
+        /// Gets or sets the connection id for the transport.
         /// </summary>
-        string ConnectionId { get; }
-
-        /// <summary>
-        /// Gets the groups the connection is a member of.
-        /// </summary>
-        IEnumerable<string> Groups { get; }
+        string ConnectionId { get; set; }
 
         /// <summary>
         /// Processes the specified <see cref="ITransportConnection"/> for this transport.

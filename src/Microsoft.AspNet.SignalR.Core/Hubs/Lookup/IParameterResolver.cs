@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
+using System.Collections.Generic;
+using Microsoft.AspNet.SignalR.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Hubs
@@ -15,6 +17,6 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <param name="method">Method descriptor.</param>
         /// <param name="values">List of values to resolve parameter values from.</param>
         /// <returns>Array of parameter values.</returns>
-        object[] ResolveMethodParameters(MethodDescriptor method, params IJsonValue[] values);
+        IList<object> ResolveMethodParameters(MethodDescriptor method, IList<IJsonValue> values);
     }
 }

@@ -1,4 +1,6 @@
-﻿using System;
+﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+
+using System;
 
 namespace Microsoft.AspNet.SignalR.Utils
 {
@@ -26,6 +28,7 @@ namespace Microsoft.AspNet.SignalR.Utils
 
         protected Action<string> Warning { get; private set; }
 
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "May be used in future derivations.")]
         protected Action<string> Error { get; private set; }
     }
 }

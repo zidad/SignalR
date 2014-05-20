@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using Microsoft.AspNet.SignalR.Json;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
@@ -47,9 +48,9 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// </summary>
         /// <param name="hub">Hub to build cache for</param>
         /// <returns>Dictionary of available methods</returns>
-        private IDictionary<string, IEnumerable<MethodDescriptor>> BuildMethodCacheFor(HubDescriptor hub)
+        private static IDictionary<string, IEnumerable<MethodDescriptor>> BuildMethodCacheFor(HubDescriptor hub)
         {
-            return ReflectionHelper.GetExportedHubMethods(hub.Type)
+            return ReflectionHelper.GetExportedHubMethods(hub.HubType)
                 .GroupBy(GetMethodName, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key,
                               group => group.Select(oload =>
@@ -58,14 +59,14 @@ namespace Microsoft.AspNet.SignalR.Hubs
                                       ReturnType = oload.ReturnType,
                                       Name = group.Key,
                                       NameSpecified = (GetMethodAttributeName(oload) != null),
-                                      Invoker = oload.Invoke,
+                                      Invoker = new HubMethodDispatcher(oload).Execute,
                                       Hub = hub,
                                       Attributes = oload.GetCustomAttributes(typeof(Attribute), inherit: true).Cast<Attribute>(),
                                       Parameters = oload.GetParameters()
                                           .Select(p => new ParameterDescriptor
                                               {
                                                   Name = p.Name,
-                                                  Type = p.ParameterType,
+                                                  ParameterType = p.ParameterType,
                                               })
                                           .ToList()
                                   }),
@@ -76,15 +77,15 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// Searches the specified <paramref name="hub">Hub</paramref> for the specified <paramref name="method"/>.
         /// </summary>
         /// <remarks>
-        /// In the case that there are multiple overloads of the specified <paramref name="method"/>, the <paramref name="parameter">parameter set</paramref> helps determine exactly which instance of the overload should be resolved. 
-        /// If there are multiple overloads found with the same number of matching paramters, none of the methods will be returned because it is not possible to determine which overload of the method was intended to be resolved.
+        /// In the case that there are multiple overloads of the specified <paramref name="method"/>, the <paramref name="parameters">parameter set</paramref> helps determine exactly which instance of the overload should be resolved. 
+        /// If there are multiple overloads found with the same number of matching parameters, none of the methods will be returned because it is not possible to determine which overload of the method was intended to be resolved.
         /// </remarks>
         /// <param name="hub">Hub to search for the specified <paramref name="method"/> on.</param>
         /// <param name="method">The method name to search for.</param>
         /// <param name="descriptor">If successful, the <see cref="MethodDescriptor"/> that was resolved.</param>
         /// <param name="parameters">The set of parameters that will be used to help locate a specific overload of the specified <paramref name="method"/>.</param>
         /// <returns>True if the method matching the name/parameter set is found on the hub, otherwise false.</returns>
-        public bool TryGetMethod(HubDescriptor hub, string method, out MethodDescriptor descriptor, params IJsonValue[] parameters)
+        public bool TryGetMethod(HubDescriptor hub, string method, out MethodDescriptor descriptor, IList<IJsonValue> parameters)
         {
             string hubMethodKey = BuildHubExecutableMethodCacheKey(hub, method, parameters);
 
@@ -114,17 +115,17 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return descriptor != null;
         }
 
-        private static string BuildHubExecutableMethodCacheKey(HubDescriptor hub, string method, IJsonValue[] parameters)
+        private static string BuildHubExecutableMethodCacheKey(HubDescriptor hub, string method, IList<IJsonValue> parameters)
         {
             string normalizedParameterCountKeyPart;
 
             if (parameters != null)
             {
-                normalizedParameterCountKeyPart = parameters.Length.ToString(CultureInfo.InvariantCulture);
+                normalizedParameterCountKeyPart = parameters.Count.ToString(CultureInfo.InvariantCulture);
             }
             else
             {
-                // NOTE: we normailize a null parameter array to be the same as an empty (i.e. Length == 0) parameter array
+                // NOTE: we normalize a null parameter array to be the same as an empty (i.e. Length == 0) parameter array
                 normalizedParameterCountKeyPart = "0";
             }
 

@@ -10,7 +10,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
     public static class ReflectionHelper
     {
         private static readonly Type[] _excludeTypes = new[] { typeof(Hub), typeof(object) };
-        private static readonly Type[] _excludeInterfaces = new[] { typeof(IHub) };
+        private static readonly Type[] _excludeInterfaces = new[] { typeof(IHub), typeof(IDisposable) };
 
         public static IEnumerable<MethodInfo> GetExportedHubMethods(Type type)
         {
@@ -19,18 +19,17 @@ namespace Microsoft.AspNet.SignalR.Hubs
                 return Enumerable.Empty<MethodInfo>();
             }
 
-            var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance);
-            var getMethods = properties.Select(p => p.GetGetMethod());
-            var setMethods = properties.Select(p => p.GetSetMethod());
-            var allPropertyMethods = getMethods.Concat(setMethods);
+            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance);
             var allInterfaceMethods = _excludeInterfaces.SelectMany(i => GetInterfaceMethods(type, i));
-            var allExcludes = allPropertyMethods.Concat(allInterfaceMethods);
 
-            var actualMethods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance);
+            return methods.Except(allInterfaceMethods).Where(IsValidHubMethod);
 
-            return actualMethods.Except(allExcludes)
-                                .Where(m => !_excludeTypes.Contains(m.DeclaringType));
+        }
 
+        private static bool IsValidHubMethod(MethodInfo methodInfo)
+        {
+            return !(_excludeTypes.Contains(methodInfo.GetBaseDefinition().DeclaringType) ||
+                     methodInfo.IsSpecialName);
         }
 
         private static IEnumerable<MethodInfo> GetInterfaceMethods(Type type, Type iface)
@@ -46,6 +45,16 @@ namespace Microsoft.AspNet.SignalR.Hubs
         public static TResult GetAttributeValue<TAttribute, TResult>(ICustomAttributeProvider source, Func<TAttribute, TResult> valueGetter)
             where TAttribute : Attribute
         {
+            if (source == null)
+            {
+                throw new ArgumentNullException("source");
+            }
+
+            if (valueGetter == null)
+            {
+                throw new ArgumentNullException("valueGetter");
+            }
+
             var attributes = source.GetCustomAttributes(typeof(TAttribute), false)
                 .Cast<TAttribute>()
                 .ToList();

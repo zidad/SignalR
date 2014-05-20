@@ -1,10 +1,12 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 
-namespace Microsoft.AspNet.SignalR
+namespace Microsoft.AspNet.SignalR.Hosting
 {
     /// <summary>
     /// Represents a connection to the client.
@@ -12,9 +14,14 @@ namespace Microsoft.AspNet.SignalR
     public interface IResponse
     {
         /// <summary>
-        /// Gets a value that determines if this client is still connected.
+        /// Gets a cancellation token that represents the client's lifetime.
         /// </summary>
-        bool IsClientConnected { get; }
+        CancellationToken CancellationToken { get; }
+
+        /// <summary>
+        /// Gets or sets the status code of the response.
+        /// </summary>
+        int StatusCode { get; set; }
 
         /// <summary>
         /// Gets or sets the content type of the response.
@@ -31,12 +38,6 @@ namespace Microsoft.AspNet.SignalR
         /// Flushes the buffered response to the client.
         /// </summary>
         /// <returns>A task that represents when the data has been flushed.</returns>
-        Task FlushAsync();
-
-        /// <summary>
-        /// Closes the connection to the client.
-        /// </summary>
-        /// <returns>A task that represents when the connection is closed.</returns>
-        Task EndAsync();
+        Task Flush();
     }
 }

@@ -2,271 +2,141 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Text;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using Microsoft.AspNet.SignalR.Client.Http;
+using Microsoft.AspNet.SignalR.Client.Infrastructure;
+using Microsoft.AspNet.SignalR.Infrastructure;
+using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Client.Transports
 {
     public abstract class HttpBasedTransport : IClientTransport
     {
         // The send query string
-        private const string _sendQueryString = "?transport={0}&connectionId={1}{2}";
+        private const string _sendQueryString = "?transport={0}&connectionData={1}&connectionToken={2}{3}";
 
         // The transport name
-        protected readonly string _transport;
+        private readonly string _transport;
 
-        protected const string HttpRequestKey = "http.Request";
+        private readonly IHttpClient _httpClient;
+        private readonly TransportAbortHandler _abortHandler;
 
-        protected readonly IHttpClient _httpClient;
-
-        public HttpBasedTransport(IHttpClient httpClient, string transport)
+        protected HttpBasedTransport(IHttpClient httpClient, string transport)
         {
             _httpClient = httpClient;
             _transport = transport;
+            _abortHandler = new TransportAbortHandler(httpClient, transport);
         }
 
-        public Task<NegotiationResponse> Negotiate(IConnection connection)
+        public string Name
         {
-            return GetNegotiationResponse(_httpClient, connection);
-        }
-
-        internal static Task<NegotiationResponse> GetNegotiationResponse(IHttpClient httpClient, IConnection connection)
-        {
-#if SILVERLIGHT || WINDOWS_PHONE
-            string negotiateUrl = connection.Url + "negotiate?" + GetNoCacheUrlParam();
-#else
-            string negotiateUrl = connection.Url + "negotiate";
-#endif
-
-
-            return httpClient.GetAsync(negotiateUrl, connection.PrepareRequest).Then(response =>
+            get
             {
-                string raw = response.ReadAsString();
-
-                if (raw == null)
-                {
-                    throw new InvalidOperationException("Server negotiation failed.");
-                }
-
-                return JsonConvert.DeserializeObject<NegotiationResponse>(raw);
-            });
+                return _transport;
+            }
         }
 
-        public Task Start(IConnection connection, string data)
+        /// <summary>
+        /// Indicates whether or not the transport supports keep alive
+        /// </summary>
+        public abstract bool SupportsKeepAlive { get; }
+
+        protected IHttpClient HttpClient
         {
-            var tcs = new TaskCompletionSource<object>();
-
-            OnStart(connection, data, () => tcs.TrySetResult(null), exception => tcs.TrySetException(exception));
-
-            return tcs.Task;
+            get { return _httpClient; }
         }
 
-        protected abstract void OnStart(IConnection connection, string data, Action initializeCallback, Action<Exception> errorCallback);
-
-        public Task<T> Send<T>(IConnection connection, string data)
+        protected TransportAbortHandler AbortHandler
         {
+            get { return _abortHandler; }
+        }
+
+        public Task<NegotiationResponse> Negotiate(IConnection connection, string connectionData)
+        {
+            return _httpClient.GetNegotiationResponse(connection, connectionData);
+        }
+
+        public Task Start(IConnection connection, string connectionData, CancellationToken disconnectToken)
+        {
+            if (connection == null)
+            {
+                throw new ArgumentNullException("connection");
+            }
+
+            var initializeHandler = new TransportInitializationHandler(connection.TotalTransportConnectTimeout, disconnectToken);
+
+            OnStart(connection, connectionData, disconnectToken, initializeHandler);
+
+            return initializeHandler.Task;
+        }
+
+        protected abstract void OnStart(IConnection connection,
+                                        string connectionData,
+                                        CancellationToken disconnectToken,
+                                        TransportInitializationHandler initializeHandler);
+
+        public Task Send(IConnection connection, string data, string connectionData)
+        {
+            if (connection == null)
+            {
+                throw new ArgumentNullException("connection");
+            }
+
             string url = connection.Url + "send";
-            string customQueryString = GetCustomQueryString(connection);
+            string customQueryString = String.IsNullOrEmpty(connection.QueryString) ? String.Empty : "&" + connection.QueryString;
 
-            url += String.Format(_sendQueryString, _transport, connection.ConnectionId, customQueryString);
+            url += String.Format(CultureInfo.InvariantCulture,
+                                _sendQueryString,
+                                _transport,
+                                connectionData,
+                                Uri.EscapeDataString(connection.ConnectionToken),
+                                customQueryString);
 
             var postData = new Dictionary<string, string> {
                 { "data", data }
             };
 
-            return _httpClient.PostAsync(url, connection.PrepareRequest, postData).Then(response =>
-            {
-                string raw = response.ReadAsString();
+            return _httpClient.Post(url, connection.PrepareRequest, postData, isLongRunning: false)
+                              .Then(response => response.ReadAsString())
+                              .Then(raw =>
+                              {
+                                  if (!String.IsNullOrEmpty(raw))
+                                  {
+                                      connection.Trace(TraceLevels.Messages, "OnMessage({0})", raw);
 
-                if (String.IsNullOrEmpty(raw))
-                {
-                    return default(T);
-                }
+                                      connection.OnReceived(connection.JsonDeserializeObject<JObject>(raw));
+                                  }
+                              })
+                              .Catch(connection.OnError);
+        }
 
-                return JsonConvert.DeserializeObject<T>(raw);
-            });
+        public void Abort(IConnection connection, TimeSpan timeout, string connectionData)
+        {
+            _abortHandler.Abort(connection, timeout, connectionData);
         }
 
         protected string GetReceiveQueryString(IConnection connection, string data)
         {
-            // ?transport={0}&connectionId={1}&messageId={2}&groups={3}&connectionData={4}{5}
-            var qsBuilder = new StringBuilder();
-            qsBuilder.Append("?transport=" + _transport)
-                     .Append("&connectionId=" + Uri.EscapeDataString(connection.ConnectionId));
-
-            if (connection.MessageId != null)
-            {
-                qsBuilder.Append("&messageId=" + Uri.EscapeDataString(connection.MessageId));
-            }
-
-            if (connection.Groups != null && connection.Groups.Any())
-            {
-                qsBuilder.Append("&groups=" + Uri.EscapeDataString(JsonConvert.SerializeObject(connection.Groups)));
-            }
-
-            if (data != null)
-            {
-                qsBuilder.Append("&connectionData=" + data);
-            }
-
-            string customQuery = GetCustomQueryString(connection);
-
-            if (!String.IsNullOrEmpty(customQuery))
-            {
-                qsBuilder.Append("&")
-                         .Append(customQuery);
-            }
-
-#if SILVERLIGHT || WINDOWS_PHONE
-            qsBuilder.Append("&").Append(GetNoCacheUrlParam());
-#endif
-            return qsBuilder.ToString();
+            return TransportHelper.GetReceiveQueryString(connection, data, _transport);
         }
 
-        private static string GetNoCacheUrlParam()
+        public abstract void LostConnection(IConnection connection);
+
+        public void Dispose()
         {
-            return "noCache=" + Guid.NewGuid().ToString();
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
 
-        protected virtual Action<IRequest> PrepareRequest(IConnection connection)
+        protected virtual void Dispose(bool disposing)
         {
-            return request =>
+            if (disposing)
             {
-                // Setup the user agent along with any other defaults
-                connection.PrepareRequest(request);
-
-                connection.Items[HttpRequestKey] = request;
-            };
-        }
-
-        public void Stop(IConnection connection)
-        {
-            var httpRequest = connection.GetValue<IRequest>(HttpRequestKey);
-            if (httpRequest != null)
-            {
-                try
-                {
-                    OnBeforeAbort(connection);
-
-                    // Abort the server side connection
-                    AbortConnection(connection);
-
-                    // Now abort the client connection
-                    httpRequest.Abort();
-                }
-                catch (NotImplementedException)
-                {
-                    // If this isn't implemented then do nothing
-                }
+                _abortHandler.Dispose();
             }
-        }
-
-        private void AbortConnection(IConnection connection)
-        {
-            string url = connection.Url + "abort" + String.Format(_sendQueryString, _transport, connection.ConnectionId, null);
-
-            try
-            {
-                // Attempt to perform a clean disconnect, but only wait 2 seconds
-                _httpClient.PostAsync(url, connection.PrepareRequest).Wait(TimeSpan.FromSeconds(2));
-            }
-            catch (Exception ex)
-            {
-                // Swallow any exceptions, but log them
-                Debug.WriteLine("Clean disconnect failed. " + ex.Unwrap().Message);
-            }
-        }
-
-
-        protected virtual void OnBeforeAbort(IConnection connection)
-        {
-
-        }
-
-        protected static void ProcessResponse(IConnection connection, string response, out bool timedOut, out bool disconnected)
-        {
-            timedOut = false;
-            disconnected = false;
-
-            if (String.IsNullOrEmpty(response))
-            {
-                return;
-            }
-
-            try
-            {
-                var result = JValue.Parse(response);
-
-                if (!result.HasValues)
-                {
-                    return;
-                }
-
-                timedOut = result.Value<bool>("TimedOut");
-                disconnected = result.Value<bool>("Disconnect");
-
-                if (disconnected)
-                {
-                    return;
-                }
-
-                var messages = result["Messages"] as JArray;
-                if (messages != null)
-                {
-                    foreach (JToken message in messages)
-                    {
-                        try
-                        {
-                            connection.OnReceived(message);
-                        }
-                        catch (Exception ex)
-                        {
-#if NET35
-                            Debug.WriteLine(String.Format(System.Globalization.CultureInfo.InvariantCulture, "Failed to process message: {0}", ex));
-#else
-                            Debug.WriteLine("Failed to process message: {0}", ex);
-#endif
-
-                            connection.OnError(ex);
-                        }
-                    }
-
-                    connection.MessageId = result["MessageId"].Value<string>();
-
-                    var transportData = result["TransportData"] as JObject;
-
-                    if (transportData != null)
-                    {
-                        var groups = (JArray)transportData["Groups"];
-                        if (groups != null)
-                        {
-                            connection.Groups = groups.Select(token => token.Value<string>());
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-#if NET35
-                Debug.WriteLine(String.Format(System.Globalization.CultureInfo.InvariantCulture, "Failed to response: {0}", ex));
-#else
-                Debug.WriteLine("Failed to response: {0}", ex);
-#endif
-                connection.OnError(ex);
-            }
-        }
-
-        private static string GetCustomQueryString(IConnection connection)
-        {
-            return String.IsNullOrEmpty(connection.QueryString)
-                            ? ""
-                            : "&" + connection.QueryString;
         }
     }
 }

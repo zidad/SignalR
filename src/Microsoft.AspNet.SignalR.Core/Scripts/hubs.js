@@ -1,5 +1,5 @@
 /*!
- * ASP.NET SignalR JavaScript Library v1.0.0
+ * ASP.NET SignalR JavaScript Library v2.0.3-pre
  * http://signalr.net/
  *
  * Copyright Microsoft Open Technologies, Inc. All rights reserved.
@@ -8,14 +8,14 @@
  *
  */
 
-/// <reference path="..\..\SignalR.Client.JS\Scripts\jquery-1.6.2.js" />
+/// <reference path="..\..\SignalR.Client.JS\Scripts\jquery-1.6.4.js" />
 /// <reference path="jquery.signalR.js" />
-(function ($, window) {
+(function ($, window, undefined) {
     /// <param name="$" type="jQuery" />
     "use strict";
 
     if (typeof ($.signalR) !== "function") {
-        throw new Error("SignalR: SignalR is not loaded. Please ensure jquery.signalR-x.js is referenced before ~/signalr/hubs.");
+        throw new Error("SignalR: SignalR is not loaded. Please ensure jquery.signalR-x.js is referenced before ~/signalr/js.");
     }
 
     var signalR = $.signalR;
@@ -42,8 +42,12 @@
                 if (shouldSubscribe) {
                     // We want to subscribe to the hub events
                     subscriptionMethod = hub.on;
+<<<<<<< HEAD
                 }
                 else {
+=======
+                } else {
+>>>>>>> upstream/master
                     // We want to unsubscribe from the hub events
                     subscriptionMethod = hub.off;
                 }
@@ -65,19 +69,38 @@
         }
     }
 
+<<<<<<< HEAD
     signalR.hub = $.hubConnection("{serviceUrl}", { useDefaultPath: false })
         .starting(function () {
             // Register the hub proxies as subscribed
             // (instance, shouldSubscribe)
             registerHubProxies(signalR, true);
+=======
+    $.hubConnection.prototype.createHubProxies = function () {
+        var proxies = {};
+        this.starting(function () {
+            // Register the hub proxies as subscribed
+            // (instance, shouldSubscribe)
+            registerHubProxies(proxies, true);
+>>>>>>> upstream/master
 
             this._registerSubscribedHubs();
         }).disconnected(function () {
             // Unsubscribe all hub proxies when we "disconnect".  This is to ensure that we do not re-add functional call backs.
             // (instance, shouldSubscribe)
+<<<<<<< HEAD
             registerHubProxies(signalR, false);
+=======
+            registerHubProxies(proxies, false);
+>>>>>>> upstream/master
         });
 
     /*hubs*/
+
+        return proxies;
+    };
+
+    signalR.hub = $.hubConnection("{serviceUrl}", { useDefaultPath: false });
+    $.extend(signalR, signalR.hub.createHubProxies());
 
 }(window.jQuery, window));

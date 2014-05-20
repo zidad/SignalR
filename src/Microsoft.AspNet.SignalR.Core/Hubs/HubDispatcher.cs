@@ -3,26 +3,36 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Hosting;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Json;
+using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
     /// <summary>
     /// Handles all communication over the hubs persistent connection.
     /// </summary>
+    [SuppressMessage("Microsoft.Maintainability", "CA1506:AvoidExcessiveClassCoupling", Justification = "This dispatcher makes use of many interfaces.")]
     public class HubDispatcher : PersistentConnection
     {
+        private const string HubsSuffix = "/hubs";
+        private const string JsSuffix = "/js";
+
         private readonly List<HubDescriptor> _hubs = new List<HubDescriptor>();
-        private readonly string _url;
+        private readonly bool _enableJavaScriptProxies;
+        private readonly bool _enableDetailedErrors;
 
         private IJavaScriptProxyGenerator _proxyGenerator;
         private IHubManager _manager;
         private IHubRequestParser _requestParser;
+        private JsonSerializer _serializer;
         private IParameterResolver _binder;
         private IHubPipelineInvoker _pipelineInvoker;
         private IPerformanceCounterManager _counters;
@@ -33,66 +43,110 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <summary>
         /// Initializes an instance of the <see cref="HubDispatcher"/> class.
         /// </summary>
-        /// <param name="url">The base url of the connection url.</param>
-        public HubDispatcher(string url)
+        /// <param name="configuration">Configuration settings determining whether to enable JS proxies and provide clients with detailed hub errors.</param>
+        public HubDispatcher(HubConfiguration configuration)
         {
-            _url = url;
+            if (configuration == null)
+            {
+                throw new ArgumentNullException("configuration");
+            }
+
+            _enableJavaScriptProxies = configuration.EnableJavaScriptProxies;
+            _enableDetailedErrors = configuration.EnableDetailedErrors;
         }
 
         protected override TraceSource Trace
         {
             get
             {
-                return _trace["SignalR.HubDispatcher"];
+                return TraceManager["SignalR.HubDispatcher"];
             }
         }
 
-        public override void Initialize(IDependencyResolver resolver, HostContext context)
+        internal override string GroupPrefix
         {
-            _proxyGenerator = resolver.Resolve<IJavaScriptProxyGenerator>();
+            get
+            {
+                return PrefixHelper.HubGroupPrefix;
+            }
+        }
+
+        public override void Initialize(IDependencyResolver resolver)
+        {
+            if (resolver == null)
+            {
+                throw new ArgumentNullException("resolver");
+            }
+
+            _proxyGenerator = _enableJavaScriptProxies ? resolver.Resolve<IJavaScriptProxyGenerator>()
+                                                       : new EmptyJavaScriptProxyGenerator();
+
             _manager = resolver.Resolve<IHubManager>();
             _binder = resolver.Resolve<IParameterResolver>();
             _requestParser = resolver.Resolve<IHubRequestParser>();
+            _serializer = resolver.Resolve<JsonSerializer>();
             _pipelineInvoker = resolver.Resolve<IHubPipelineInvoker>();
-
             _counters = resolver.Resolve<IPerformanceCounterManager>();
 
-            // Call base initializer before populating _hubs so the _jsonSerializer is initialized
-            base.Initialize(resolver, context);
+            base.Initialize(resolver);
+        }
+
+        protected override bool AuthorizeRequest(IRequest request)
+        {
+            if (request == null)
+            {
+                throw new ArgumentNullException("request");
+            }
 
             // Populate _hubs
-            string data = context.Request.QueryStringOrForm("connectionData");
+            string data = request.QueryString["connectionData"];
 
             if (!String.IsNullOrEmpty(data))
             {
-                var clientHubInfo = _jsonSerializer.Parse<IEnumerable<ClientHubInfo>>(data);
-                if (clientHubInfo != null)
+                var clientHubInfo = JsonSerializer.Parse<IEnumerable<ClientHubInfo>>(data);
+
+                // If there's any hubs then perform the auth check
+                if (clientHubInfo != null && clientHubInfo.Any())
                 {
+                    var hubCache = new Dictionary<string, HubDescriptor>(StringComparer.OrdinalIgnoreCase);
+
                     foreach (var hubInfo in clientHubInfo)
                     {
+                        if (hubCache.ContainsKey(hubInfo.Name))
+                        {
+                            throw new InvalidOperationException(Resources.Error_DuplicateHubNamesInConnectionData);
+                        }
+
                         // Try to find the associated hub type
                         HubDescriptor hubDescriptor = _manager.EnsureHub(hubInfo.Name,
-                            _counters.ErrorsHubResolutionTotal,
-                            _counters.ErrorsHubResolutionPerSec,
-                            _counters.ErrorsAllTotal,
-                            _counters.ErrorsAllPerSec);
+                                                        _counters.ErrorsHubResolutionTotal,
+                                                        _counters.ErrorsHubResolutionPerSec,
+                                                        _counters.ErrorsAllTotal,
+                                                        _counters.ErrorsAllPerSec);
 
-                        if (_pipelineInvoker.AuthorizeConnect(hubDescriptor, context.Request))
+                        if (_pipelineInvoker.AuthorizeConnect(hubDescriptor, request))
                         {
                             // Add this to the list of hub descriptors this connection is interested in
-                            _hubs.Add(hubDescriptor);
+                            hubCache.Add(hubDescriptor.Name, hubDescriptor);
                         }
                     }
+
+                    _hubs.AddRange(hubCache.Values);
+
+                    // If we have any hubs in the list then we're authorized
+                    return _hubs.Count > 0;
                 }
             }
+
+            return base.AuthorizeRequest(request);
         }
 
         /// <summary>
         /// Processes the hub's incoming method calls.
         /// </summary>
-        protected override Task OnReceivedAsync(IRequest request, string connectionId, string data)
+        protected override Task OnReceived(IRequest request, string connectionId, string data)
         {
-            HubRequest hubRequest = _requestParser.Parse(data);
+            HubRequest hubRequest = _requestParser.Parse(data, _serializer);
 
             // Create the hub
             HubDescriptor descriptor = _manager.EnsureHub(hubRequest.Hub,
@@ -105,59 +159,102 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
             // Resolve the method
             MethodDescriptor methodDescriptor = _manager.GetHubMethod(descriptor.Name, hubRequest.Method, parameterValues);
+
             if (methodDescriptor == null)
             {
                 _counters.ErrorsHubInvocationTotal.Increment();
                 _counters.ErrorsHubInvocationPerSec.Increment();
-                throw new InvalidOperationException(String.Format(CultureInfo.CurrentCulture, "'{0}' method could not be resolved.", hubRequest.Method));
+
+                // Empty (noop) method descriptor
+                // Use: Forces the hub pipeline module to throw an error.  This error is encapsulated in the HubDispatcher.
+                //      Encapsulating it in the HubDispatcher prevents the error from bubbling up to the transport level.
+                //      Specifically this allows us to return a faulted task (call .fail on client) and to not cause the
+                //      transport to unintentionally fail.
+                methodDescriptor = new NullMethodDescriptor(descriptor, hubRequest.Method);
             }
 
             // Resolving the actual state object
-            var state = new TrackingDictionary(hubRequest.State);
-            var hub = CreateHub(request, descriptor, connectionId, state, throwIfFailedToCreate: true);
+            var tracker = new StateChangeTracker(hubRequest.State);
+            var hub = CreateHub(request, descriptor, connectionId, tracker, throwIfFailedToCreate: true);
 
-            return InvokeHubPipeline(request, connectionId, data, hubRequest, parameterValues, methodDescriptor, state, hub)
-                .ContinueWith(task => hub.Dispose(), TaskContinuationOptions.ExecuteSynchronously);
+            return InvokeHubPipeline(hub, parameterValues, methodDescriptor, hubRequest, tracker)
+                .ContinueWithPreservedCulture(task => hub.Dispose(), TaskContinuationOptions.ExecuteSynchronously);
         }
 
-        private Task InvokeHubPipeline(IRequest request, string connectionId, string data, HubRequest hubRequest, IJsonValue[] parameterValues, MethodDescriptor methodDescriptor, TrackingDictionary state, IHub hub)
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flown to the caller.")]
+        private Task InvokeHubPipeline(IHub hub,
+                                       IJsonValue[] parameterValues,
+                                       MethodDescriptor methodDescriptor,
+                                       HubRequest hubRequest,
+                                       StateChangeTracker tracker)
         {
+            Task<object> piplineInvocation;
 
-            var args = _binder.ResolveMethodParameters(methodDescriptor, parameterValues);
-            var context = new HubInvokerContext(hub, state, methodDescriptor, args);
-
-            // Invoke the pipeline
-            return _pipelineInvoker.Invoke(context)
-                                   .ContinueWith(task =>
-                                   {
-                                       if (task.IsFaulted)
-                                       {
-                                           return ProcessResponse(state, null, hubRequest, task.Exception);
-                                       }
-                                       else
-                                       {
-                                           return ProcessResponse(state, task.Result, hubRequest, null);
-                                       }
-                                   })
-                                   .FastUnwrap();
-
-        }
-
-        public override Task ProcessRequestAsync(HostContext context)
-        {
-            // Trim any trailing slashes
-            string normalized = context.Request.Url.LocalPath.TrimEnd('/');
-
-            if (normalized.EndsWith("/hubs", StringComparison.OrdinalIgnoreCase))
+            try
             {
-                // Generate the proxy
-                context.Response.ContentType = "application/x-javascript";
-                return context.Response.EndAsync(_proxyGenerator.GenerateProxy(_url));
+                var args = _binder.ResolveMethodParameters(methodDescriptor, parameterValues);
+                var context = new HubInvokerContext(hub, tracker, methodDescriptor, args);
+
+                // Invoke the pipeline and save the task
+                piplineInvocation = _pipelineInvoker.Invoke(context);
+            }
+            catch (Exception ex)
+            {
+                piplineInvocation = TaskAsyncHelper.FromError<object>(ex);
             }
 
-            _isDebuggingEnabled = context.IsDebuggingEnabled();
+            // Determine if we have a faulted task or not and handle it appropriately.
+            return piplineInvocation.ContinueWithPreservedCulture(task =>
+            {
+                if (task.IsFaulted)
+                {
+                    return ProcessResponse(tracker, result: null, request: hubRequest, error: task.Exception);
+                }
+                else if (task.IsCanceled)
+                {
+                    return ProcessResponse(tracker, result: null, request: hubRequest, error: new OperationCanceledException());
+                }
+                else
+                {
+                    return ProcessResponse(tracker, task.Result, hubRequest, error: null);
+                }
+            })
+            .FastUnwrap();
+        }
 
-            return base.ProcessRequestAsync(context);
+        public override Task ProcessRequest(HostContext context)
+        {
+            if (context == null)
+            {
+                throw new ArgumentNullException("context");
+            }
+
+            // Trim any trailing slashes
+            string normalized = context.Request.LocalPath.TrimEnd('/');
+
+            int suffixLength = -1;
+            if (normalized.EndsWith(HubsSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                suffixLength = HubsSuffix.Length;
+            }
+            else if (normalized.EndsWith(JsSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                suffixLength = JsSuffix.Length;
+            }
+
+            if (suffixLength != -1)
+            {
+                // Generate the proper JS proxy url
+                string hubUrl = normalized.Substring(0, normalized.Length - suffixLength);
+
+                // Generate the proxy
+                context.Response.ContentType = JsonUtility.JavaScriptMimeType;
+                return context.Response.End(_proxyGenerator.GenerateProxy(hubUrl));
+            }
+
+            _isDebuggingEnabled = context.Environment.IsDebugEnabled();
+
+            return base.ProcessRequest(context);
         }
 
         internal static Task Connect(IHub hub)
@@ -175,13 +272,14 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return hub.OnDisconnected();
         }
 
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "A faulted task is returned.")]
         internal static Task<object> Incoming(IHubIncomingInvokerContext context)
         {
             var tcs = new TaskCompletionSource<object>();
 
             try
             {
-                var result = context.MethodDescriptor.Invoker.Invoke(context.Hub, context.Args);
+                object result = context.MethodDescriptor.Invoker(context.Hub, context.Args.ToArray());
                 Type returnType = context.MethodDescriptor.ReturnType;
 
                 if (typeof(Task).IsAssignableFrom(returnType))
@@ -220,7 +318,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             }
             catch (Exception ex)
             {
-                tcs.TrySetException(ex);
+                tcs.TrySetUnwrappedException(ex);
             }
 
             return tcs.Task;
@@ -228,53 +326,72 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
         internal static Task Outgoing(IHubOutgoingInvokerContext context)
         {
-            var message = new ConnectionMessage(context.Signal, context.Invocation)
-            {
-                ExcludedSignals = context.ExcludedSignals
-            };
+            ConnectionMessage message = context.GetConnectionMessage();
 
             return context.Connection.Send(message);
         }
 
-        protected override Task OnConnectedAsync(IRequest request, string connectionId)
+        protected override Task OnConnected(IRequest request, string connectionId)
         {
-            return ExecuteHubEventAsync(request, connectionId, hub => _pipelineInvoker.Connect(hub));
+            return ExecuteHubEvent(request, connectionId, hub => _pipelineInvoker.Connect(hub));
         }
 
-        protected override Task OnReconnectedAsync(IRequest request, string connectionId)
+        protected override Task OnReconnected(IRequest request, string connectionId)
         {
-            return ExecuteHubEventAsync(request, connectionId, hub => _pipelineInvoker.Reconnect(hub));
+            return ExecuteHubEvent(request, connectionId, hub => _pipelineInvoker.Reconnect(hub));
         }
 
-        protected override IEnumerable<string> OnRejoiningGroups(IRequest request, IEnumerable<string> groups, string connectionId)
+        protected override IList<string> OnRejoiningGroups(IRequest request, IList<string> groups, string connectionId)
         {
             return _hubs.Select(hubDescriptor =>
             {
-                string groupPrefix = hubDescriptor.Type.Name + ".";
-                IEnumerable<string> groupsToRejoin = _pipelineInvoker.RejoiningGroups(hubDescriptor,
-                                                                                      request,
-                                                                                      groups.Where(g => g.StartsWith(groupPrefix))
-                                                                                            .Select(g => g.Substring(groupPrefix.Length)))
-                                                                     .Select(g => groupPrefix + g);
-                return groupsToRejoin;
-            }).SelectMany(groupsToRejoin => groupsToRejoin);
+                string groupPrefix = hubDescriptor.Name + ".";
+
+                var hubGroups = groups.Where(g => g.StartsWith(groupPrefix, StringComparison.OrdinalIgnoreCase))
+                                      .Select(g => g.Substring(groupPrefix.Length))
+                                      .ToList();
+
+                return _pipelineInvoker.RejoiningGroups(hubDescriptor, request, hubGroups)
+                                        .Select(g => groupPrefix + g);
+
+            }).SelectMany(groupsToRejoin => groupsToRejoin).ToList();
         }
 
-        protected override Task OnDisconnectAsync(IRequest request, string connectionId)
+        protected override Task OnDisconnected(IRequest request, string connectionId)
         {
-            return ExecuteHubEventAsync(request, connectionId, hub => _pipelineInvoker.Disconnect(hub));
+            return ExecuteHubEvent(request, connectionId, hub => _pipelineInvoker.Disconnect(hub));
         }
 
-        protected override IEnumerable<string> GetSignals(string connectionId)
+        protected override IList<string> GetSignals(string userId, string connectionId)
         {
-            return _hubs.SelectMany(info => new[] { info.Name, info.CreateQualifiedName(connectionId) })
-                        .Concat(new[] { connectionId, "ACK_" + connectionId });
+            var signals = _hubs.SelectMany(info =>
+            {
+                var items = new List<string>
+                { 
+                    PrefixHelper.GetHubName(info.Name), 
+                    PrefixHelper.GetHubConnectionId(info.CreateQualifiedName(connectionId)),
+                };
+
+                if (!String.IsNullOrEmpty(userId))
+                {
+                    items.Add(PrefixHelper.GetHubUserId(info.CreateQualifiedName(userId)));
+                }
+
+                return items;
+            })
+            .Concat(new[] 
+            { 
+                PrefixHelper.GetConnectionId(connectionId), 
+                PrefixHelper.GetAck(connectionId) 
+            });
+
+            return signals.ToList();
         }
 
-        private Task ExecuteHubEventAsync(IRequest request, string connectionId, Func<IHub, Task> action)
+        private Task ExecuteHubEvent(IRequest request, string connectionId, Func<IHub, Task> action)
         {
             var hubs = GetHubs(request, connectionId).ToList();
-            var operations = hubs.Select(instance => action(instance).Catch().OrEmpty()).ToArray();
+            var operations = hubs.Select(instance => action(instance).OrEmpty().Catch()).ToArray();
 
             if (operations.Length == 0)
             {
@@ -289,7 +406,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
                 var faulted = tasks.FirstOrDefault(t => t.IsFaulted);
                 if (faulted != null)
                 {
-                    tcs.SetException(faulted.Exception);
+                    tcs.SetUnwrappedException(faulted.Exception);
                 }
                 else if (tasks.Any(t => t.IsCanceled))
                 {
@@ -304,7 +421,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return tcs.Task;
         }
 
-        private IHub CreateHub(IRequest request, HubDescriptor descriptor, string connectionId, TrackingDictionary state = null, bool throwIfFailedToCreate = false)
+        private IHub CreateHub(IRequest request, HubDescriptor descriptor, string connectionId, StateChangeTracker tracker = null, bool throwIfFailedToCreate = false)
         {
             try
             {
@@ -312,18 +429,18 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
                 if (hub != null)
                 {
-                    state = state ?? new TrackingDictionary();
+                    tracker = tracker ?? new StateChangeTracker();
 
                     hub.Context = new HubCallerContext(request, connectionId);
-                    hub.Clients = new HubConnectionContext(_pipelineInvoker, Connection, descriptor.Name, connectionId, state);
-                    hub.Groups = new GroupManager(Connection, descriptor.Name);
+                    hub.Clients = new HubConnectionContext(_pipelineInvoker, Connection, descriptor.Name, connectionId, tracker);
+                    hub.Groups = new GroupManager(Connection, PrefixHelper.GetHubGroupName(descriptor.Name));
                 }
 
                 return hub;
             }
             catch (Exception ex)
             {
-                Trace.TraceInformation("Error creating hub {0}. " + ex.Message, descriptor.Name);
+                Trace.TraceInformation(String.Format(CultureInfo.CurrentCulture, Resources.Error_ErrorCreatingHub + ex.Message, descriptor.Name));
 
                 if (throwIfFailedToCreate)
                 {
@@ -342,7 +459,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
                    select hub;
         }
 
-        private void DisposeHubs(IEnumerable<IHub> hubs)
+        private static void DisposeHubs(IEnumerable<IHub> hubs)
         {
             foreach (var hub in hubs)
             {
@@ -350,40 +467,43 @@ namespace Microsoft.AspNet.SignalR.Hubs
             }
         }
 
-        private Task ProcessTaskResult<T>(TrackingDictionary state, HubRequest request, Task<T> task)
+        private Task ProcessResponse(StateChangeTracker tracker, object result, HubRequest request, Exception error)
         {
-            if (task.IsFaulted)
+            var hubResult = new HubResponse
             {
-                return ProcessResponse(state, null, request, task.Exception);
-            }
+                State = tracker.GetChanges(),
+                Result = result,
+                Id = request.Id,
+            };
 
-            return ProcessResponse(state, task.Result, request, null);
-        }
-
-        private Task ProcessResponse(TrackingDictionary state, object result, HubRequest request, Exception error)
-        {
-            var exception = error.Unwrap();
-            string stackTrace = (exception != null && _isDebuggingEnabled) ? exception.StackTrace : null;
-            string errorMessage = exception != null ? exception.Message : null;
-
-            if (exception != null)
+            if (error != null)
             {
                 _counters.ErrorsHubInvocationTotal.Increment();
                 _counters.ErrorsHubInvocationPerSec.Increment();
                 _counters.ErrorsAllTotal.Increment();
                 _counters.ErrorsAllPerSec.Increment();
+
+                var hubError = error.InnerException as HubException;
+
+                if (_enableDetailedErrors || hubError != null)
+                {
+                    var exception = error.InnerException ?? error;
+                    hubResult.StackTrace = _isDebuggingEnabled ? exception.StackTrace : null;
+                    hubResult.Error = exception.Message;
+
+                    if (hubError != null)
+                    {
+                        hubResult.IsHubException = true;
+                        hubResult.ErrorData = hubError.ErrorData;
+                    }
+                }
+                else
+                {
+                    hubResult.Error = String.Format(CultureInfo.CurrentCulture, Resources.Error_HubInvocationFailed, request.Hub, request.Method);
+                }
             }
 
-            var hubResult = new HubResponse
-            {
-                State = state.GetChanges(),
-                Result = result,
-                Id = request.Id,
-                Error = errorMessage,
-                StackTrace = stackTrace
-            };
-
-            return _transport.Send(hubResult);
+            return Transport.Send(hubResult);
         }
 
         private static void ContinueWith<T>(Task<T> task, TaskCompletionSource<object> tcs)
@@ -403,7 +523,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
         {
             if (task.IsFaulted)
             {
-                tcs.TrySetException(task.Exception);
+                tcs.TrySetUnwrappedException(task.Exception);
             }
             else if (task.IsCanceled)
             {
@@ -417,11 +537,11 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
         private static void ContinueAsync<T>(Task<T> task, TaskCompletionSource<object> tcs)
         {
-            task.ContinueWith(t =>
+            task.ContinueWithPreservedCulture(t =>
             {
                 if (t.IsFaulted)
                 {
-                    tcs.TrySetException(t.Exception);
+                    tcs.TrySetUnwrappedException(t.Exception);
                 }
                 else if (t.IsCanceled)
                 {
@@ -434,6 +554,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             });
         }
 
+        [SuppressMessage("Microsoft.Performance", "CA1812:AvoidUninstantiatedInternalClasses", Justification = "It is instantiated through JSON deserialization.")]
         private class ClientHubInfo
         {
             public string Name { get; set; }

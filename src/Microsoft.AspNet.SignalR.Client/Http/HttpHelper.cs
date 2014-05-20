@@ -2,18 +2,18 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading.Tasks;
-using Microsoft.AspNet.SignalR.Client.Infrastructure;
 using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Client.Http
 {
     internal static class HttpHelper
     {
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flowed back to the caller.")]
         public static Task<HttpWebResponse> GetHttpResponseAsync(this HttpWebRequest request)
         {
             try
@@ -26,6 +26,7 @@ namespace Microsoft.AspNet.SignalR.Client.Http
             }
         }
 
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flowed back to the caller.")]
         public static Task<Stream> GetHttpRequestStreamAsync(this HttpWebRequest request)
         {
             try
@@ -38,11 +39,6 @@ namespace Microsoft.AspNet.SignalR.Client.Http
             }
         }
 
-        public static Task<HttpWebResponse> GetAsync(string url)
-        {
-            return GetAsync(url, requestPreparer: null);
-        }
-
         public static Task<HttpWebResponse> GetAsync(string url, Action<HttpWebRequest> requestPreparer)
         {
             HttpWebRequest request = CreateWebRequest(url);
@@ -53,54 +49,7 @@ namespace Microsoft.AspNet.SignalR.Client.Http
             return request.GetHttpResponseAsync();
         }
 
-        public static Task<HttpWebResponse> PostAsync(string url)
-        {
-            return PostInternal(url, requestPreparer: null, postData: null);
-        }
-
-        public static Task<HttpWebResponse> PostAsync(string url, IDictionary<string, string> postData)
-        {
-            return PostInternal(url, requestPreparer: null, postData: postData);
-        }
-
-        public static Task<HttpWebResponse> PostAsync(string url, Action<HttpWebRequest> requestPreparer)
-        {
-            return PostInternal(url, requestPreparer, postData: null);
-        }
-
         public static Task<HttpWebResponse> PostAsync(string url, Action<HttpWebRequest> requestPreparer, IDictionary<string, string> postData)
-        {
-            return PostInternal(url, requestPreparer, postData);
-        }
-
-        public static string ReadAsString(this HttpWebResponse response)
-        {
-            try
-            {
-                using (response)
-                {
-                    using (Stream stream = response.GetResponseStream())
-                    {
-                        using (var reader = new StreamReader(stream))
-                        {
-                            return reader.ReadToEnd();
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-#if NET35
-                Debug.WriteLine(String.Format(System.Globalization.CultureInfo.InvariantCulture, "Failed to read response: {0}", ex));
-#else
-                Debug.WriteLine("Failed to read response: {0}", ex);
-#endif
-                // Swallow exceptions when reading the response stream and just try again.
-                return null;
-            }
-        }
-
-        private static Task<HttpWebResponse> PostInternal(string url, Action<HttpWebRequest> requestPreparer, IDictionary<string, string> postData)
         {
             HttpWebRequest request = CreateWebRequest(url);
 
@@ -113,10 +62,9 @@ namespace Microsoft.AspNet.SignalR.Client.Http
 
             request.Method = "POST";
             request.ContentType = "application/x-www-form-urlencoded";
-#if !WINDOWS_PHONE && !SILVERLIGHT
+
             // Set the content length if the buffer is non-null
             request.ContentLength = buffer != null ? buffer.LongLength : 0;
-#endif
 
             if (buffer == null)
             {
@@ -130,6 +78,7 @@ namespace Microsoft.AspNet.SignalR.Client.Http
                 .Then(() => request.GetHttpResponseAsync());
         }
 
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Globalization", "CA1305:SpecifyIFormatProvider", MessageId = "System.Text.StringBuilder.AppendFormat(System.String,System.Object[])", Justification = "This will never be localized.")]
         private static byte[] ProcessPostData(IDictionary<string, string> postData)
         {
             if (postData == null || postData.Count == 0)
@@ -150,7 +99,7 @@ namespace Microsoft.AspNet.SignalR.Client.Http
                     continue;
                 }
 
-                sb.AppendFormat("{0}={1}", pair.Key, UriQueryUtility.UrlEncode(pair.Value));
+                sb.AppendFormat("{0}={1}", pair.Key, UrlEncoder.UrlEncode(pair.Value));
             }
 
             return Encoding.UTF8.GetBytes(sb.ToString());
@@ -159,15 +108,7 @@ namespace Microsoft.AspNet.SignalR.Client.Http
         private static HttpWebRequest CreateWebRequest(string url)
         {
             HttpWebRequest request = null;
-#if WINDOWS_PHONE
             request = (HttpWebRequest)WebRequest.Create(url);
-            request.AllowReadStreamBuffering = false;
-#elif SILVERLIGHT
-            request = (HttpWebRequest)System.Net.Browser.WebRequestCreator.ClientHttp.Create(new Uri(url));
-            request.AllowReadStreamBuffering = false;
-#else
-            request = (HttpWebRequest)WebRequest.Create(url);
-#endif
             return request;
         }
     }

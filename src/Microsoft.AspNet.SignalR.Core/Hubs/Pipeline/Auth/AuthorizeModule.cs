@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -70,7 +71,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
                 // Get hub attributes implementing IAuthorizeHubConnection from the cache
                 // If the attributes do not exist in the cache, retrieve them using reflection and add them to the cache
-                var attributeAuthorizers = _connectionAuthorizersCache.GetOrAdd(hubDescriptor.Type,
+                var attributeAuthorizers = _connectionAuthorizersCache.GetOrAdd(hubDescriptor.HubType,
                     hubType => hubType.GetCustomAttributes(typeof(IAuthorizeHubConnection), inherit: true).Cast<IAuthorizeHubConnection>());
 
                 // Every attribute (if any) implementing IAuthorizeHubConnection attached to the relevant hub MUST allow the connection
@@ -83,7 +84,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return base.BuildIncoming(context =>
             {
                 // Execute the global method invocation authorizer if there is one and short circuit if it denies authorization.
-                if (_globalInvocationAuthorizer == null || _globalInvocationAuthorizer.AuthorizeHubMethodInvocation(context))
+                if (_globalInvocationAuthorizer == null || _globalInvocationAuthorizer.AuthorizeHubMethodInvocation(context, appliesToMethod: false))
                 {
                     // Get hub attributes implementing IAuthorizeHubMethodInvocation from the cache
                     // If the attributes do not exist in the cache, retrieve them using reflection and add them to the cache
@@ -91,15 +92,22 @@ namespace Microsoft.AspNet.SignalR.Hubs
                         hubType => hubType.GetCustomAttributes(typeof(IAuthorizeHubMethodInvocation), inherit: true).Cast<IAuthorizeHubMethodInvocation>());
 
                     // Execute all hub level authorizers and short circuit if ANY deny authorization.
-                    if (classLevelAuthorizers.All(a => a.AuthorizeHubMethodInvocation(context)))
+                    if (classLevelAuthorizers.All(a => a.AuthorizeHubMethodInvocation(context, appliesToMethod: false)))
                     {
+                        // If the MethodDescriptor is a NullMethodDescriptor, we don't want to cache it since a new one is created
+                        // for each invocation with an invalid method name. #1801
+                        if (context.MethodDescriptor is NullMethodDescriptor)
+                        {
+                            return invoke(context);
+                        }
+
                         // Get method attributes implementing IAuthorizeHubMethodInvocation from the cache
                         // If the attributes do not exist in the cache, retrieve them from the MethodDescriptor and add them to the cache
                         var methodLevelAuthorizers = _methodInvocationAuthorizersCache.GetOrAdd(context.MethodDescriptor,
                             methodDescriptor => methodDescriptor.Attributes.OfType<IAuthorizeHubMethodInvocation>());
                         
                         // Execute all method level authorizers. If ALL provide authorization, continue executing the invocation pipeline.
-                        if (methodLevelAuthorizers.All(a => a.AuthorizeHubMethodInvocation(context)))
+                        if (methodLevelAuthorizers.All(a => a.AuthorizeHubMethodInvocation(context, appliesToMethod: true)))
                         {
                             return invoke(context);
                         }
@@ -108,7 +116,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
                 
                 // Send error back to the client
                 return TaskAsyncHelper.FromError<object>(
-                    new NotAuthorizedException(String.Format("Caller is not authorized to invoke the {0} method on {1}.",
+                    new NotAuthorizedException(String.Format(CultureInfo.CurrentCulture, Resources.Error_CallerNotAuthorizedToInvokeMethodOn,
                                                              context.MethodDescriptor.Name,
                                                              context.MethodDescriptor.Hub.Name)));
             });

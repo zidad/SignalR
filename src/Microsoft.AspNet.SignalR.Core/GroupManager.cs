@@ -1,8 +1,11 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Messaging;
 
 namespace Microsoft.AspNet.SignalR
 {
@@ -18,7 +21,7 @@ namespace Microsoft.AspNet.SignalR
         /// Initializes a new instance of the <see cref="GroupManager"/> class.
         /// </summary>
         /// <param name="connection">The <see cref="IConnection"/> this group resides on.</param>
-        /// <param name="groupPrefix">The prefix for this group. Either a <see cref="IHub"/> name or <see cref="PersistentConnection"/> type name.</param>
+        /// <param name="groupPrefix">The prefix for this group. Either a <see cref="Microsoft.AspNet.SignalR.Hubs.IHub"/> name or <see cref="PersistentConnection"/> type name.</param>
         public GroupManager(IConnection connection, string groupPrefix)
         {
             if (connection == null)
@@ -35,19 +38,40 @@ namespace Microsoft.AspNet.SignalR
         /// </summary>
         /// <param name="groupName">The name of the group.</param>
         /// <param name="value">The value to send.</param>
+        /// <param name="excludeConnectionIds">The list of connection ids to exclude</param>
         /// <returns>A task that represents when send is complete.</returns>
-        public Task Send(string groupName, object value, params string[] exclude)
+        public Task Send(string groupName, object value, params string[] excludeConnectionIds)
         {
-            if (groupName == null)
+            if (String.IsNullOrEmpty(groupName))
             {
-                throw new ArgumentNullException("groupName");
+                throw new ArgumentException((Resources.Error_ArgumentNullOrEmpty), "groupName");
             }
 
             var qualifiedName = CreateQualifiedName(groupName);
-            var message = new ConnectionMessage(qualifiedName, value)
+            var message = new ConnectionMessage(qualifiedName,
+                                                value,
+                                                PrefixHelper.GetPrefixedConnectionIds(excludeConnectionIds));
+
+            return _connection.Send(message);
+        }
+
+        /// <summary>
+        /// Sends a value to the specified group.
+        /// </summary>
+        /// <param name="groupNames">The names of the groups.</param>
+        /// <param name="value">The value to send.</param>
+        /// <param name="excludeConnectionIds">The list of connection ids to exclude</param>
+        /// <returns>A task that represents when send is complete.</returns>
+        public Task Send(IList<string> groupNames, object value, params string[] excludeConnectionIds)
+        {
+            if (groupNames == null)
             {
-                ExcludedSignals = exclude
-            };
+                throw new ArgumentNullException("groupNames");
+            }
+
+            var message = new ConnectionMessage(groupNames.Select(groupName => CreateQualifiedName(groupName)).ToList(),
+                                                value,
+                                                PrefixHelper.GetPrefixedConnectionIds(excludeConnectionIds));
 
             return _connection.Send(message);
         }
@@ -72,7 +96,7 @@ namespace Microsoft.AspNet.SignalR
 
             var command = new Command
             {
-                Type = CommandType.AddToGroup,
+                CommandType = CommandType.AddToGroup,
                 Value = CreateQualifiedName(groupName),
                 WaitForAck = true
             };
@@ -100,7 +124,7 @@ namespace Microsoft.AspNet.SignalR
 
             var command = new Command
             {
-                Type = CommandType.RemoveFromGroup,
+                CommandType = CommandType.RemoveFromGroup,
                 Value = CreateQualifiedName(groupName),
                 WaitForAck = true
             };

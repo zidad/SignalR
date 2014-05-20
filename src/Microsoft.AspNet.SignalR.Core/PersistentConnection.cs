@@ -3,10 +3,21 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Configuration;
+using Microsoft.AspNet.SignalR.Hosting;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Json;
+using Microsoft.AspNet.SignalR.Messaging;
+using Microsoft.AspNet.SignalR.Owin;
+using Microsoft.AspNet.SignalR.Tracing;
 using Microsoft.AspNet.SignalR.Transports;
+using Microsoft.Owin;
+using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR
 {
@@ -16,48 +27,69 @@ namespace Microsoft.AspNet.SignalR
     public abstract class PersistentConnection
     {
         private const string WebSocketsTransportName = "webSockets";
+        private static readonly char[] SplitChars = new[] { ':' };
+        private static readonly ProtocolResolver _protocolResolver = new ProtocolResolver();
 
-        protected IMessageBus _newMessageBus;
-        protected IJsonSerializer _jsonSerializer;
-        protected IConnectionIdPrefixGenerator _connectionIdPrefixGenerator;
-        protected IAckHandler _ackHandler;
         private IConfigurationManager _configurationManager;
         private ITransportManager _transportManager;
         private bool _initialized;
-
-
-        protected ITraceManager _trace;
-        protected IPerformanceCounterManager _counters;
-        protected ITransport _transport;
         private IServerCommandHandler _serverMessageHandler;
 
-        public virtual void Initialize(IDependencyResolver resolver, HostContext context)
+        public virtual void Initialize(IDependencyResolver resolver)
         {
+            if (resolver == null)
+            {
+                throw new ArgumentNullException("resolver");
+            }
+
             if (_initialized)
             {
                 return;
             }
 
-            _newMessageBus = resolver.Resolve<IMessageBus>();
+            MessageBus = resolver.Resolve<IMessageBus>();
+            JsonSerializer = resolver.Resolve<JsonSerializer>();
+            TraceManager = resolver.Resolve<ITraceManager>();
+            Counters = resolver.Resolve<IPerformanceCounterManager>();
+            AckHandler = resolver.Resolve<IAckHandler>();
+            ProtectedData = resolver.Resolve<IProtectedData>();
+            UserIdProvider = resolver.Resolve<IUserIdProvider>();
+
             _configurationManager = resolver.Resolve<IConfigurationManager>();
-            _connectionIdPrefixGenerator = resolver.Resolve<IConnectionIdPrefixGenerator>();
-            _jsonSerializer = resolver.Resolve<IJsonSerializer>();
             _transportManager = resolver.Resolve<ITransportManager>();
-            _trace = resolver.Resolve<ITraceManager>();
             _serverMessageHandler = resolver.Resolve<IServerCommandHandler>();
-            _counters = resolver.Resolve<IPerformanceCounterManager>();
-            _ackHandler = resolver.Resolve<IAckHandler>();
 
             _initialized = true;
+        }
+
+        public bool Authorize(IRequest request)
+        {
+            return AuthorizeRequest(request);
         }
 
         protected virtual TraceSource Trace
         {
             get
             {
-                return _trace["SignalR.PersistentConnection"];
+                return TraceManager["SignalR.PersistentConnection"];
             }
         }
+
+        protected IProtectedData ProtectedData { get; private set; }
+
+        protected IMessageBus MessageBus { get; private set; }
+
+        protected JsonSerializer JsonSerializer { get; private set; }
+
+        protected IAckHandler AckHandler { get; private set; }
+
+        protected ITraceManager TraceManager { get; private set; }
+
+        protected IPerformanceCounterManager Counters { get; private set; }
+
+        protected ITransport Transport { get; private set; }
+
+        protected IUserIdProvider UserIdProvider { get; private set; }
 
         /// <summary>
         /// Gets the <see cref="IConnection"/> for the <see cref="PersistentConnection"/>.
@@ -81,8 +113,62 @@ namespace Microsoft.AspNet.SignalR
         {
             get
             {
+                return PrefixHelper.GetPersistentConnectionName(DefaultSignalRaw);
+            }
+        }
+
+        private string DefaultSignalRaw
+        {
+            get
+            {
                 return GetType().FullName;
             }
+        }
+
+        internal virtual string GroupPrefix
+        {
+            get
+            {
+                return PrefixHelper.PersistentConnectionGroupPrefix;
+            }
+        }
+
+        /// <summary>
+        /// OWIN entry point.
+        /// </summary>
+        /// <param name="environment"></param>
+        /// <returns></returns>
+        public Task ProcessRequest(IDictionary<string, object> environment)
+        {
+            var context = new HostContext(environment);
+
+            // Disable request compression and buffering on IIS
+            environment.DisableRequestCompression();
+            environment.DisableResponseBuffering();
+
+            var response = new OwinResponse(environment);
+
+            // Add the nosniff header for all responses to prevent IE from trying to sniff mime type from contents
+            response.Headers.Set("X-Content-Type-Options", "nosniff");
+
+            if (Authorize(context.Request))
+            {
+                return ProcessRequest(context);
+            }
+
+            if (context.Request.User != null &&
+                context.Request.User.Identity.IsAuthenticated)
+            {
+                // If the user is authenticated and authorize failed then 403
+                response.StatusCode = 403;
+            }
+            else
+            {
+                // If we failed to authorize the request then return a 401
+                response.StatusCode = 401;
+            }
+
+            return TaskAsyncHelper.Empty;
         }
 
         /// <summary>
@@ -95,96 +181,210 @@ namespace Microsoft.AspNet.SignalR
         /// Thrown if the transport wasn't specified.
         /// Thrown if the connection id wasn't specified.
         /// </exception>
-        public virtual Task ProcessRequestAsync(HostContext context)
+        public virtual Task ProcessRequest(HostContext context)
         {
+            if (context == null)
+            {
+                throw new ArgumentNullException("context");
+            }
+
             if (!_initialized)
             {
-                throw new InvalidOperationException("Connection not initialized.");
+                throw new InvalidOperationException(String.Format(CultureInfo.CurrentCulture, Resources.Error_ConnectionNotInitialized));
             }
 
             if (IsNegotiationRequest(context.Request))
             {
                 return ProcessNegotiationRequest(context);
             }
-
-            _transport = GetTransport(context);
-
-            if (_transport == null)
+            else if (IsPingRequest(context.Request))
             {
-                throw new InvalidOperationException("Protocol error: Unknown transport.");
+                return ProcessPingRequest(context);
             }
 
-            string connectionId = _transport.ConnectionId;
+            Transport = GetTransport(context);
+
+            if (Transport == null)
+            {
+                return FailResponse(context.Response, String.Format(CultureInfo.CurrentCulture, Resources.Error_ProtocolErrorUnknownTransport));
+            }
+
+            string connectionToken = context.Request.QueryString["connectionToken"];
 
             // If there's no connection id then this is a bad request
-            if (String.IsNullOrEmpty(connectionId))
+            if (String.IsNullOrEmpty(connectionToken))
             {
-                throw new InvalidOperationException("Protocol error: Missing connection id.");
+                return FailResponse(context.Response, String.Format(CultureInfo.CurrentCulture, Resources.Error_ProtocolErrorMissingConnectionToken));
             }
 
-            IEnumerable<string> signals = GetSignals(connectionId);
-            IEnumerable<string> groups = OnRejoiningGroups(context.Request, _transport.Groups, connectionId);
+            string connectionId;
+            string message;
+            int statusCode;
+            
+            if (!TryGetConnectionId(context, connectionToken, out connectionId, out message, out statusCode))
+            {
+                return FailResponse(context.Response, message, statusCode);
+            }
+
+            // Set the transport's connection id to the unprotected one
+            Transport.ConnectionId = connectionId;
+
+            // Get the user id from the request
+            string userId = UserIdProvider.GetUserId(context.Request);
+
+            IList<string> signals = GetSignals(userId, connectionId);
+            IList<string> groups = AppendGroupPrefixes(context, connectionId);
 
             Connection connection = CreateConnection(connectionId, signals, groups);
 
             Connection = connection;
-            Groups = new GroupManager(connection, DefaultSignal);
+            string groupName = PrefixHelper.GetPersistentConnectionGroupName(DefaultSignalRaw);
+            Groups = new GroupManager(connection, groupName);
 
-            _transport.TransportConnected = () =>
+            Transport.TransportConnected = () =>
             {
                 var command = new ServerCommand
                 {
-                    Type = ServerCommandType.RemoveConnection,
+                    ServerCommandType = ServerCommandType.RemoveConnection,
                     Value = connectionId
                 };
 
                 return _serverMessageHandler.SendCommand(command);
             };
 
-            _transport.Connected = () =>
+            Transport.Connected = () =>
             {
-                return OnConnectedAsync(context.Request, connectionId).OrEmpty();
+                return TaskAsyncHelper.FromMethod(() => OnConnected(context.Request, connectionId).OrEmpty());
             };
 
-            _transport.Reconnected = () =>
+            Transport.Reconnected = () =>
             {
-                return OnReconnectedAsync(context.Request, connectionId).OrEmpty();
+                return TaskAsyncHelper.FromMethod(() => OnReconnected(context.Request, connectionId).OrEmpty());
             };
 
-            _transport.Received = data =>
+            Transport.Received = data =>
             {
-                _counters.ConnectionMessagesSentTotal.Increment();
-                _counters.ConnectionMessagesSentPerSec.Increment();
-                return OnReceivedAsync(context.Request, connectionId, data).OrEmpty();
+                Counters.ConnectionMessagesSentTotal.Increment();
+                Counters.ConnectionMessagesSentPerSec.Increment();
+                return TaskAsyncHelper.FromMethod(() => OnReceived(context.Request, connectionId, data).OrEmpty());
             };
 
-            _transport.Disconnected = () =>
+            Transport.Disconnected = () =>
             {
-                return OnDisconnectAsync(context.Request, connectionId).OrEmpty();
+                return TaskAsyncHelper.FromMethod(() => OnDisconnected(context.Request, connectionId).OrEmpty());
             };
 
-            return _transport.ProcessRequest(connection).OrEmpty().Catch(_counters.ErrorsAllTotal, _counters.ErrorsAllPerSec);
+            return Transport.ProcessRequest(connection).OrEmpty().Catch(Counters.ErrorsAllTotal, Counters.ErrorsAllPerSec);
         }
 
-        protected virtual Connection CreateConnection(string connectionId, IEnumerable<string> signals, IEnumerable<string> groups)
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "We want to catch any exception when unprotecting data.")]
+        internal bool TryGetConnectionId(HostContext context,
+                                           string connectionToken,
+                                           out string connectionId,
+                                           out string message,
+                                           out int statusCode)
         {
-            return new Connection(_newMessageBus,
-                                  _jsonSerializer,
+            string unprotectedConnectionToken = null;
+
+            // connectionId is only valid when this method returns true
+            connectionId = null;
+
+            // message and statusCode are only valid when this method returns false
+            message = null;
+            statusCode = 400;
+
+            try
+            {
+                unprotectedConnectionToken = ProtectedData.Unprotect(connectionToken, Purposes.ConnectionToken);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceInformation("Failed to process connectionToken {0}: {1}", connectionToken, ex);
+            }
+
+            if (String.IsNullOrEmpty(unprotectedConnectionToken))
+            {
+                message = String.Format(CultureInfo.CurrentCulture, Resources.Error_ConnectionIdIncorrectFormat);
+                return false;
+            }
+
+            var tokens = unprotectedConnectionToken.Split(SplitChars, 2);
+
+            connectionId = tokens[0];
+            string tokenUserName = tokens.Length > 1 ? tokens[1] : String.Empty;
+            string userName = GetUserIdentity(context);
+
+            if (!String.Equals(tokenUserName, userName, StringComparison.OrdinalIgnoreCase))
+            {
+                message = String.Format(CultureInfo.CurrentCulture, Resources.Error_UnrecognizedUserIdentity);
+                statusCode = 403;
+                return false;
+            }
+
+            return true;
+        }
+
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "We want to prevent any failures in unprotecting")]
+        internal IList<string> VerifyGroups(HostContext context, string connectionId)
+        {
+            string groupsToken = context.Request.QueryString["groupsToken"];
+
+            if (String.IsNullOrEmpty(groupsToken))
+            {
+                return ListHelper<string>.Empty;
+            }
+
+            string unprotectedGroupsToken = null;
+
+            try
+            {
+                unprotectedGroupsToken = ProtectedData.Unprotect(groupsToken, Purposes.Groups);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceInformation("Failed to process groupsToken {0}: {1}", groupsToken, ex);
+            }
+
+            if (String.IsNullOrEmpty(unprotectedGroupsToken))
+            {
+                return ListHelper<string>.Empty;
+            }
+
+            var tokens = unprotectedGroupsToken.Split(SplitChars, 2);
+
+            string groupConnectionId = tokens[0];
+            string groupsValue = tokens.Length > 1 ? tokens[1] : String.Empty;
+
+            if (!String.Equals(groupConnectionId, connectionId, StringComparison.OrdinalIgnoreCase))
+            {
+                return ListHelper<string>.Empty;
+            }
+
+            return JsonSerializer.Parse<string[]>(groupsValue);
+        }
+
+        private IList<string> AppendGroupPrefixes(HostContext context, string connectionId)
+        {
+            return (from g in OnRejoiningGroups(context.Request, VerifyGroups(context, connectionId), connectionId)
+                    select GroupPrefix + g).ToList();
+        }
+
+        private Connection CreateConnection(string connectionId, IList<string> signals, IList<string> groups)
+        {
+            return new Connection(MessageBus,
+                                  JsonSerializer,
                                   DefaultSignal,
                                   connectionId,
                                   signals,
                                   groups,
-                                  _trace,
-                                  _ackHandler,
-                                  _counters);
+                                  TraceManager,
+                                  AckHandler,
+                                  Counters,
+                                  ProtectedData);
         }
 
-        /// <summary>
-        /// Returns the default signals for the <see cref="PersistentConnection"/>.
-        /// </summary>
-        /// <param name="connectionId">The id of the incoming connection.</param>
-        /// <returns>The default signals for this <see cref="PersistentConnection"/>.</returns>
-        protected IEnumerable<string> GetDefaultSignals(string connectionId)
+        [SuppressMessage("Microsoft.Usage", "CA1801:ReviewUnusedParameters", MessageId = "userId", Justification = "This method is virtual and is used in the derived class")]
+        private IList<string> GetDefaultSignals(string userId, string connectionId)
         {
             // The list of default signals this connection cares about:
             // 1. The default signal (the type name)
@@ -193,19 +393,30 @@ namespace Microsoft.AspNet.SignalR
 
             return new string[] {
                 DefaultSignal,
-                connectionId,
-                "ACK_" + connectionId
+                PrefixHelper.GetConnectionId(connectionId),
+                PrefixHelper.GetAck(connectionId)
             };
         }
 
         /// <summary>
         /// Returns the signals used in the <see cref="PersistentConnection"/>.
         /// </summary>
+        /// <param name="userId">The user id for the current connection.</param>
         /// <param name="connectionId">The id of the incoming connection.</param>
         /// <returns>The signals used for this <see cref="PersistentConnection"/>.</returns>
-        protected virtual IEnumerable<string> GetSignals(string connectionId)
+        protected virtual IList<string> GetSignals(string userId, string connectionId)
         {
-            return GetDefaultSignals(connectionId);
+            return GetDefaultSignals(userId, connectionId);
+        }
+
+        /// <summary>
+        /// Called before every request and gives the user a authorize the user.
+        /// </summary>
+        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
+        /// <returns>A boolean value that represents if the request is authorized.</returns>
+        protected virtual bool AuthorizeRequest(IRequest request)
+        {
+            return true;
         }
 
         /// <summary>
@@ -215,9 +426,9 @@ namespace Microsoft.AspNet.SignalR
         /// <param name="groups">The groups the calling connection claims to be part of.</param>
         /// <param name="connectionId">The id of the reconnecting client.</param>
         /// <returns>A collection of group names that should be joined on reconnect</returns>
-        protected virtual IEnumerable<string> OnRejoiningGroups(IRequest request, IEnumerable<string> groups, string connectionId)
+        protected virtual IList<string> OnRejoiningGroups(IRequest request, IList<string> groups, string connectionId)
         {
-            return Enumerable.Empty<string>();
+            return groups;
         }
 
         /// <summary>
@@ -226,7 +437,7 @@ namespace Microsoft.AspNet.SignalR
         /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
         /// <param name="connectionId">The id of the connecting client.</param>
         /// <returns>A <see cref="Task"/> that completes when the connect operation is complete.</returns>
-        protected virtual Task OnConnectedAsync(IRequest request, string connectionId)
+        protected virtual Task OnConnected(IRequest request, string connectionId)
         {
             return TaskAsyncHelper.Empty;
         }
@@ -237,7 +448,7 @@ namespace Microsoft.AspNet.SignalR
         /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
         /// <param name="connectionId">The id of the re-connecting client.</param>
         /// <returns>A <see cref="Task"/> that completes when the re-connect operation is complete.</returns>
-        protected virtual Task OnReconnectedAsync(IRequest request, string connectionId)
+        protected virtual Task OnReconnected(IRequest request, string connectionId)
         {
             return TaskAsyncHelper.Empty;
         }
@@ -249,7 +460,7 @@ namespace Microsoft.AspNet.SignalR
         /// <param name="connectionId">The id of the connection sending the data.</param>
         /// <param name="data">The payload sent to the connection.</param>
         /// <returns>A <see cref="Task"/> that completes when the receive operation is complete.</returns>
-        protected virtual Task OnReceivedAsync(IRequest request, string connectionId, string data)
+        protected virtual Task OnReceived(IRequest request, string connectionId, string data)
         {
             return TaskAsyncHelper.Empty;
         }
@@ -257,46 +468,89 @@ namespace Microsoft.AspNet.SignalR
         /// <summary>
         /// Called when a connection disconnects.
         /// </summary>
+        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
         /// <param name="connectionId">The id of the disconnected connection.</param>
         /// <returns>A <see cref="Task"/> that completes when the disconnect operation is complete.</returns>
-        protected virtual Task OnDisconnectAsync(IRequest request, string connectionId)
+        protected virtual Task OnDisconnected(IRequest request, string connectionId)
         {
             return TaskAsyncHelper.Empty;
         }
 
-        private Task ProcessNegotiationRequest(HostContext context)
+        private Task ProcessPingRequest(HostContext context)
         {
-            var keepAlive = _configurationManager.KeepAlive;
             var payload = new
             {
-                Url = context.Request.Url.LocalPath.Replace("/negotiate", ""),
-                ConnectionId = _connectionIdPrefixGenerator.GenerateConnectionIdPrefix(context.Request) + Guid.NewGuid().ToString("d"),
-                KeepAlive = (keepAlive != null) ? keepAlive.Value.TotalSeconds : (double?)null,
-                TryWebSockets = _transportManager.SupportsTransport(WebSocketsTransportName) && context.SupportsWebSockets(),
-                WebSocketServerUrl = context.WebSocketServerUrl(),
-                ProtocolVersion = "1.0"
+                Response = "pong"
             };
 
             if (!String.IsNullOrEmpty(context.Request.QueryString["callback"]))
             {
-                return ProcessJsonpNegotiationRequest(context, payload);
+                return ProcessJsonpRequest(context, payload);
             }
 
-            context.Response.ContentType = Json.MimeType;
-            return context.Response.EndAsync(_jsonSerializer.Stringify(payload));
+            context.Response.ContentType = JsonUtility.JsonMimeType;
+            return context.Response.End(JsonSerializer.Stringify(payload));
         }
 
-        private Task ProcessJsonpNegotiationRequest(HostContext context, object payload)
+        private Task ProcessNegotiationRequest(HostContext context)
         {
-            context.Response.ContentType = Json.JsonpMimeType;
-            var data = Json.CreateJsonpCallback(context.Request.QueryString["callback"], _jsonSerializer.Stringify(payload));
+            // Total amount of time without a keep alive before the client should attempt to reconnect in seconds.
+            var keepAliveTimeout = _configurationManager.KeepAliveTimeout();
+            string connectionId = Guid.NewGuid().ToString("d");
+            string connectionToken = connectionId + ':' + GetUserIdentity(context);
 
-            return context.Response.EndAsync(data);
+            var payload = new
+            {
+                Url = context.Request.LocalPath.Replace("/negotiate", ""),
+                ConnectionToken = ProtectedData.Protect(connectionToken, Purposes.ConnectionToken),
+                ConnectionId = connectionId,
+                KeepAliveTimeout = keepAliveTimeout != null ? keepAliveTimeout.Value.TotalSeconds : (double?)null,
+                DisconnectTimeout = _configurationManager.DisconnectTimeout.TotalSeconds,
+                TryWebSockets = _transportManager.SupportsTransport(WebSocketsTransportName) && context.Environment.SupportsWebSockets(),
+                ProtocolVersion = _protocolResolver.Resolve(context.Request).ToString(),
+                TransportConnectTimeout = _configurationManager.TransportConnectTimeout.TotalSeconds
+            };
+
+            if (!String.IsNullOrEmpty(context.Request.QueryString["callback"]))
+            {
+                return ProcessJsonpRequest(context, payload);
+            }
+
+            context.Response.ContentType = JsonUtility.JsonMimeType;
+            return context.Response.End(JsonSerializer.Stringify(payload));
         }
 
-        private bool IsNegotiationRequest(IRequest request)
+        private static string GetUserIdentity(HostContext context)
         {
-            return request.Url.LocalPath.EndsWith("/negotiate", StringComparison.OrdinalIgnoreCase);
+            if (context.Request.User != null && context.Request.User.Identity.IsAuthenticated)
+            {
+                return context.Request.User.Identity.Name ?? String.Empty;
+            }
+            return String.Empty;
+        }
+
+        private Task ProcessJsonpRequest(HostContext context, object payload)
+        {
+            context.Response.ContentType = JsonUtility.JavaScriptMimeType;
+            var data = JsonUtility.CreateJsonpCallback(context.Request.QueryString["callback"], JsonSerializer.Stringify(payload));
+
+            return context.Response.End(data);
+        }
+
+        private static Task FailResponse(IResponse response, string message, int statusCode = 400)
+        {
+            response.StatusCode = statusCode;
+            return response.End(message);
+        }
+
+        private static bool IsNegotiationRequest(IRequest request)
+        {
+            return request.LocalPath.EndsWith("/negotiate", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsPingRequest(IRequest request)
+        {
+            return request.LocalPath.EndsWith("/ping", StringComparison.OrdinalIgnoreCase);
         }
 
         private ITransport GetTransport(HostContext context)

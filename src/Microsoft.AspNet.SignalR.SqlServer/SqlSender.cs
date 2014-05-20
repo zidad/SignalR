@@ -1,54 +1,55 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
+using System.Data.SqlTypes;
+using System.Diagnostics;
+using System.Globalization;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
+using Microsoft.AspNet.SignalR.Messaging;
 
 namespace Microsoft.AspNet.SignalR.SqlServer
 {
     internal class SqlSender
     {
         private readonly string _connectionString;
-        private readonly string _tableName;
+        private readonly string _insertDml;
+        private readonly TraceSource _trace;
+        private readonly IDbProviderFactory _dbProviderFactory;
 
-        private string _insertSql = "INSERT INTO {0} (Payload) VALUES (@Payload)";
-
-        public SqlSender(string connectionString, string tableName)
+        public SqlSender(string connectionString, string tableName, TraceSource traceSource, IDbProviderFactory dbProviderFactory)
         {
             _connectionString = connectionString;
-            _tableName = tableName;
-            _insertSql = String.Format(_insertSql, _tableName);
+            _insertDml = BuildInsertString(tableName);
+            _trace = traceSource;
+            _dbProviderFactory = dbProviderFactory;
         }
 
-        public Task Send(Message[] messages)
+        private string BuildInsertString(string tableName)
         {
-            if (messages == null || messages.Length == 0)
+            var insertDml = GetType().Assembly.StringResource("Microsoft.AspNet.SignalR.SqlServer.send.sql");
+
+            return insertDml.Replace("[SignalR]", String.Format(CultureInfo.InvariantCulture, "[{0}]", SqlMessageBus.SchemaName))
+                            .Replace("[Messages_0", String.Format(CultureInfo.InvariantCulture, "[{0}", tableName));
+        }
+
+        public Task Send(IList<Message> messages)
+        {
+            if (messages == null || messages.Count == 0)
             {
                 return TaskAsyncHelper.Empty;
             }
 
-            SqlConnection connection = null;
-            try
-            {
-                connection = new SqlConnection(_connectionString);
-                connection.Open();
-                var cmd = new SqlCommand(_insertSql, connection);
-                cmd.Parameters.AddWithValue("Payload", JsonConvert.SerializeObject(messages));
-                
-                return cmd.ExecuteNonQueryAsync()
-                    .Then(() => connection.Close()) // close the connection if successful
-                    .Catch(ex => connection.Close()); // close the connection if it explodes
-            }
-            catch (SqlException)
-            {
-                if (connection != null && connection.State != ConnectionState.Closed)
-                {
-                    connection.Close();
-                }
-                throw;
-            }
+            var parameter = _dbProviderFactory.CreateParameter();
+            parameter.ParameterName = "Payload";
+            parameter.DbType = DbType.Binary;
+            parameter.Value = SqlPayload.ToBytes(messages);
+            
+            var operation = new DbOperation(_connectionString, _insertDml, _trace, parameter);
+
+            return operation.ExecuteNonQueryAsync();
         }
     }
 }

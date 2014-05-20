@@ -1,26 +1,29 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
-using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Dynamic;
 using System.Threading.Tasks;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
-    public class SignalProxy : DynamicObject, IClientProxy
+    public abstract class SignalProxy : DynamicObject, IClientProxy
     {
-        protected readonly Func<string, ClientHubInvocation, IEnumerable<string>, Task> _send;
-        protected readonly string _signal;
-        protected readonly string _hubName;
-        private readonly string[] _exclude;
+        private readonly IList<string> _exclude;
 
-        public SignalProxy(Func<string, ClientHubInvocation, IEnumerable<string>, Task> send, string signal, string hubName, params string[] exclude)
+        protected SignalProxy(IConnection connection, IHubPipelineInvoker invoker, string signal, string hubName, string prefix, IList<string> exclude)
         {
-            _send = send;
-            _signal = signal;
-            _hubName = hubName;
+            Connection = connection;
+            Invoker = invoker;
+            HubName = hubName;
+            Signal = prefix + hubName + "." + signal;
             _exclude = exclude;
         }
+
+        protected IConnection Connection { get; private set; }
+        protected IHubPipelineInvoker Invoker { get; private set; }
+        protected string Signal { get; private set; }
+        protected string HubName { get; private set; }
 
         public override bool TryGetMember(GetMemberBinder binder, out object result)
         {
@@ -28,6 +31,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return false;
         }
 
+        [SuppressMessage("Microsoft.Design", "CA1062:Validate arguments of public methods", MessageId = "0", Justification = "The compiler generates calls to invoke this")]
         public override bool TryInvokeMember(InvokeMemberBinder binder, object[] args, out object result)
         {
             result = Invoke(binder.Name, args);
@@ -38,19 +42,21 @@ namespace Microsoft.AspNet.SignalR.Hubs
         {
             var invocation = GetInvocationData(method, args);
 
-            string signal = _hubName + "." + _signal;
+            var context = new HubOutgoingInvokerContext(Connection, Signal, invocation)
+            {
+                ExcludedSignals = _exclude
+            };
 
-            return _send(signal, invocation, _exclude);
+            return Invoker.Send(context);
         }
 
         protected virtual ClientHubInvocation GetInvocationData(string method, object[] args)
         {
             return new ClientHubInvocation
             {
-                Hub = _hubName,
+                Hub = HubName,
                 Method = method,
-                Args = args,
-                Target = _signal
+                Args = args
             };
         }
     }

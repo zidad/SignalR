@@ -1,33 +1,44 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
-using System.Threading;
+using System.Collections.Specialized;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Hosting;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Json;
+using Microsoft.AspNet.SignalR.Tracing;
+using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
+    [SuppressMessage("Microsoft.Design", "CA1001:TypesThatOwnDisposableFieldsShouldBeDisposable", Justification = "The disposer is an optimization")]
     public abstract class ForeverTransport : TransportDisconnectBase, ITransport
     {
         private readonly IPerformanceCounterManager _counters;
-        private IJsonSerializer _jsonSerializer;
+        private JsonSerializer _jsonSerializer;
         private string _lastMessageId;
+
+        private RequestLifetime _transportLifetime;
 
         private const int MaxMessages = 10;
 
-        public ForeverTransport(HostContext context, IDependencyResolver resolver)
+        protected ForeverTransport(HostContext context, IDependencyResolver resolver)
             : this(context,
-                   resolver.Resolve<IJsonSerializer>(),
-                   resolver.Resolve<ITransportHeartBeat>(),
-                   resolver.Resolve<IPerformanceCounterManager>())
+                   resolver.Resolve<JsonSerializer>(),
+                   resolver.Resolve<ITransportHeartbeat>(),
+                   resolver.Resolve<IPerformanceCounterManager>(),
+                   resolver.Resolve<ITraceManager>())
         {
         }
 
-        public ForeverTransport(HostContext context,
-                                IJsonSerializer jsonSerializer,
-                                ITransportHeartBeat heartBeat,
-                                IPerformanceCounterManager performanceCounterWriter)
-            : base(context, jsonSerializer, heartBeat, performanceCounterWriter)
+        protected ForeverTransport(HostContext context,
+                                   JsonSerializer jsonSerializer,
+                                   ITransportHeartbeat heartbeat,
+                                   IPerformanceCounterManager performanceCounterWriter,
+                                   ITraceManager traceManager)
+            : base(context, heartbeat, performanceCounterWriter, traceManager)
         {
             _jsonSerializer = jsonSerializer;
             _counters = performanceCounterWriter;
@@ -44,51 +55,24 @@ namespace Microsoft.AspNet.SignalR.Transports
 
                 return _lastMessageId;
             }
-            private set
-            {
-                _lastMessageId = value;
-            }
         }
 
-        protected IJsonSerializer JsonSerializer
+        protected JsonSerializer JsonSerializer
         {
             get { return _jsonSerializer; }
         }
 
+        internal TaskCompletionSource<object> InitializeTcs { get; set; }
+
         protected virtual void OnSending(string payload)
         {
-            HeartBeat.MarkConnection(this);
-
-            if (Sending != null)
-            {
-                Sending(payload);
-            }
+            Heartbeat.MarkConnection(this);
         }
 
         protected virtual void OnSendingResponse(PersistentResponse response)
         {
-            HeartBeat.MarkConnection(this);
-
-            if (SendingResponse != null)
-            {
-                SendingResponse(response);
-            }
+            Heartbeat.MarkConnection(this);
         }
-
-        protected static void OnReceiving(string data)
-        {
-            if (Receiving != null)
-            {
-                Receiving(data);
-            }
-        }
-
-        // Static events intended for use when measuring performance
-        public static event Action<string> Sending;
-
-        public static event Action<PersistentResponse> SendingResponse;
-
-        public static event Action<string> Receiving;
 
         public Func<string, Task> Received { get; set; }
 
@@ -98,11 +82,34 @@ namespace Microsoft.AspNet.SignalR.Transports
 
         public Func<Task> Reconnected { get; set; }
 
+        // Unit testing hooks
+        internal Action AfterReceive;
+        internal Action BeforeCancellationTokenCallbackRegistered;
+        internal Action BeforeReceive;
+        internal Action<Exception> AfterRequestEnd;
+
+        protected override void InitializePersistentState()
+        {
+            // PersistentConnection.OnConnected must complete before we can write to the output stream,
+            // so clients don't indicate the connection has started too early.
+            InitializeTcs = new TaskCompletionSource<object>();
+
+            // WriteQueue must be reinitialized before calling base.InitializePersistentState to ensure
+            // _requestLifeTime will be properly initialized.
+            WriteQueue = new TaskQueue(InitializeTcs.Task);
+
+            base.InitializePersistentState();
+
+            // The _transportLifetime must be initialized after calling base.InitializePersistentState since
+            // _transportLifetime depends on _requestLifetime.
+            _transportLifetime = new RequestLifetime(this, _requestLifeTime);
+        }
+
         protected Task ProcessRequestCore(ITransportConnection connection)
         {
             Connection = connection;
 
-            if (Context.Request.Url.LocalPath.EndsWith("/send"))
+            if (Context.Request.LocalPath.EndsWith("/send", StringComparison.OrdinalIgnoreCase))
             {
                 return ProcessSendRequest();
             }
@@ -113,33 +120,6 @@ namespace Microsoft.AspNet.SignalR.Transports
             else
             {
                 InitializePersistentState();
-
-                if (IsConnectRequest)
-                {
-                    if (Connected != null)
-                    {
-                        // Return a task that completes when the connected event task & the receive loop task are both finished
-                        bool newConnection = HeartBeat.AddConnection(this);
-                        return TaskAsyncHelper.Interleave(ProcessReceiveRequestWithoutTracking, () =>
-                        {
-                            if (newConnection)
-                            {
-                                return Connected().Then(() => _counters.ConnectionsConnected.Increment());
-                            }
-                            return TaskAsyncHelper.Empty;
-                        }
-                        , connection, Completed);
-                    }
-
-                    return ProcessReceiveRequest(connection);
-                }
-
-                if (Reconnected != null)
-                {
-                    // Return a task that completes when the reconnected event task & the receive loop task are both finished
-                    Func<Task> reconnected = () => Reconnected().Then(() => _counters.ConnectionsReconnected.Increment());
-                    return TaskAsyncHelper.Interleave(ProcessReceiveRequest, reconnected, connection, Completed);
-                }
 
                 return ProcessReceiveRequest(connection);
             }
@@ -154,205 +134,299 @@ namespace Microsoft.AspNet.SignalR.Transports
 
         public virtual Task Send(object value)
         {
-            Context.Response.ContentType = Json.MimeType;
+            var context = new ForeverTransportContext(this, value);
 
-            return EnqueueOperation(() =>
-            {
-                JsonSerializer.Serialize(value, OutputWriter);
-                OutputWriter.Flush();
-
-                return Context.Response.EndAsync();
-            });
+            return EnqueueOperation(state => PerformSend(state), context);
         }
 
-        protected virtual Task InitializeResponse(ITransportConnection connection)
+        protected internal virtual Task InitializeResponse(ITransportConnection connection)
         {
             return TaskAsyncHelper.Empty;
         }
 
-        protected void IncrementErrorCounters(Exception exception)
+        protected internal override Task EnqueueOperation(Func<object, Task> writeAsync, object state)
         {
-            _counters.ErrorsTransportTotal.Increment();
-            _counters.ErrorsTransportPerSec.Increment();
-            _counters.ErrorsAllTotal.Increment();
-            _counters.ErrorsAllPerSec.Increment();
+            Task task = base.EnqueueOperation(writeAsync, state);
+
+            // If PersistentConnection.OnConnected has not completed (as indicated by InitializeTcs),
+            // the queue will be blocked to prevent clients from prematurely indicating the connection has
+            // started, but we must keep receive loop running to continue processing commands and to
+            // prevent deadlocks caused by waiting on ACKs.
+            if (InitializeTcs == null || InitializeTcs.Task.IsCompleted)
+            {
+                return task;
+            }
+
+            return TaskAsyncHelper.Empty;
         }
 
-        private Task ProcessSendRequest()
+        
+        protected void OnError(Exception ex)
         {
-            string data = Context.Request.Form["data"];
+            IncrementErrors();
 
-            OnReceiving(data);
+            // Cancel any pending writes in the queue
+            InitializeTcs.TrySetCanceled();
+
+            // Complete the http request
+            _transportLifetime.Complete(ex);
+        }
+
+        private async Task ProcessSendRequest()
+        {
+            INameValueCollection form = await Context.Request.ReadForm();
+            string data = form["data"];
 
             if (Received != null)
             {
-                return Received(data);
+                await Received(data);
             }
+        }
+
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flowed to the caller.")]
+        private Task ProcessReceiveRequest(ITransportConnection connection)
+        {
+            Func<Task> initialize = null;
+
+            // If this transport isn't replacing an existing transport, oldConnection will be null.
+            ITrackingConnection oldConnection = Heartbeat.AddOrUpdateConnection(this);
+            bool newConnection = oldConnection == null;
+
+            if (IsConnectRequest)
+            {
+                Func<Task> connected;
+                if (newConnection)
+                {
+                    connected = Connected ?? _emptyTaskFunc;
+                    _counters.ConnectionsConnected.Increment();
+                }
+                else
+                {
+                    // Wait until the previous call to Connected completes.
+                    // We don't want to call Connected twice
+                    connected = () => oldConnection.ConnectTask;
+                }
+
+                initialize = () =>
+                {
+                    return connected().Then((conn, id) => conn.Initialize(id), connection, ConnectionId);
+                };
+            }
+            else
+            {
+                initialize = Reconnected;
+            }
+
+            var series = new Func<object, Task>[]
+            { 
+                state => ((Func<Task>)state).Invoke(),
+                state => ((Func<Task>)state).Invoke()
+            };
+
+            var states = new object[] { TransportConnected ?? _emptyTaskFunc,
+                                        initialize ?? _emptyTaskFunc };
+
+            Func<Task> fullInit = () => TaskAsyncHelper.Series(series, states).ContinueWith(_connectTcs);
+
+            return ProcessMessages(connection, fullInit);
+        }
+
+        [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope", Justification = "The object is disposed otherwise")]
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flowed to the caller.")]
+        private Task ProcessMessages(ITransportConnection connection, Func<Task> initialize)
+        {
+            var disposer = new Disposer();
+
+            if (BeforeCancellationTokenCallbackRegistered != null)
+            {
+                BeforeCancellationTokenCallbackRegistered();
+            }
+
+            var cancelContext = new ForeverTransportContext(this, disposer);
+
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            IDisposable registration = ConnectionEndToken.SafeRegister(state => Cancel(state), cancelContext);
+
+            var messageContext = new MessageContext(this, _transportLifetime, registration);
+
+            if (BeforeReceive != null)
+            {
+                BeforeReceive();
+            }
+
+            try
+            {
+                // Ensure we enqueue the response initialization before any messages are received
+                EnqueueOperation(state => InitializeResponse((ITransportConnection)state), connection)
+                    .Catch((ex, state) => OnError(ex, state), messageContext);
+
+                // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+                IDisposable subscription = connection.Receive(LastMessageId,
+                                                              (response, state) => OnMessageReceived(response, state),
+                                                               MaxMessages,
+                                                               messageContext);
+
+
+                disposer.Set(subscription);
+
+                if (AfterReceive != null)
+                {
+                    AfterReceive();
+                }
+
+                // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+                initialize().Then(tcs => tcs.TrySetResult(null), InitializeTcs)
+                            .Catch((ex, state) => OnError(ex, state), messageContext);
+            }
+            catch (OperationCanceledException ex)
+            {
+                InitializeTcs.TrySetCanceled();
+
+                _transportLifetime.Complete(ex);
+            }
+            catch (Exception ex)
+            {
+                InitializeTcs.TrySetCanceled();
+
+                _transportLifetime.Complete(ex);
+            }
+
+            return _requestLifeTime.Task;
+        }
+
+        private static void Cancel(object state)
+        {
+            var context = (ForeverTransportContext)state;
+
+            context.Transport.Trace.TraceEvent(TraceEventType.Verbose, 0, "Cancel(" + context.Transport.ConnectionId + ")");
+
+            ((IDisposable)context.State).Dispose();
+        }
+
+        private static Task<bool> OnMessageReceived(PersistentResponse response, object state)
+        {
+            var context = (MessageContext)state;
+
+            response.Reconnect = context.Transport.HostShutdownToken.IsCancellationRequested;
+
+            // If we're telling the client to disconnect then clean up the instantiated connection.
+            if (response.Disconnect)
+            {
+                // Send the response before removing any connection data
+                return context.Transport.Send(response).Then(c => OnDisconnectMessage(c), context)
+                                        .Then(() => TaskAsyncHelper.False);
+            }
+            else if (context.Transport.IsTimedOut || response.Aborted)
+            {
+                context.Registration.Dispose();
+
+                if (response.Aborted)
+                {
+                    // If this was a clean disconnect raise the event.
+                    return context.Transport.Abort()
+                                            .Then(() => TaskAsyncHelper.False);
+                }
+            }
+
+            if (response.Terminal)
+            {
+                // End the request on the terminal response
+                context.Lifetime.Complete();
+
+                return TaskAsyncHelper.False;
+            }
+
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return context.Transport.Send(response)
+                                    .Then(() => TaskAsyncHelper.True);
+        }
+
+        private static void OnDisconnectMessage(MessageContext context)
+        {
+            context.Transport.ApplyState(TransportConnectionStates.DisconnectMessageReceived);
+
+            context.Registration.Dispose();
+
+            // Remove connection without triggering disconnect
+            context.Transport.Heartbeat.RemoveConnection(context.Transport);
+        }
+
+        private static Task PerformSend(object state)
+        {
+            var context = (ForeverTransportContext)state;
+
+            if (!context.Transport.IsAlive)
+            {
+                return TaskAsyncHelper.Empty;
+            }
+
+            context.Transport.Context.Response.ContentType = JsonUtility.JsonMimeType;
+
+            context.Transport.JsonSerializer.Serialize(context.State, context.Transport.OutputWriter);
+            context.Transport.OutputWriter.Flush();
 
             return TaskAsyncHelper.Empty;
         }
 
-        private Task ProcessReceiveRequest(ITransportConnection connection, Action postReceive = null)
+        private static void OnError(AggregateException ex, object state)
         {
-            HeartBeat.AddConnection(this);
-            return ProcessReceiveRequestWithoutTracking(connection, postReceive);
+            var context = (MessageContext)state;
+
+            context.Transport.OnError(ex);
         }
 
-        private Task ProcessReceiveRequestWithoutTracking(ITransportConnection connection, Action postReceive = null)
+        private class ForeverTransportContext
         {
-            Func<Task> afterReceive = () =>
+            public object State;
+            public ForeverTransport Transport;
+
+            public ForeverTransportContext(ForeverTransport foreverTransport, object state)
             {
-                if (TransportConnected != null)
-                {
-                    TransportConnected().Catch(_counters.ErrorsAllTotal, _counters.ErrorsAllPerSec);
-                }
-
-                if (postReceive != null)
-                {
-                    try
-                    {
-                        postReceive();
-                    }
-                    catch (Exception ex)
-                    {
-                        return TaskAsyncHelper.FromError(ex);
-                    }
-                }
-
-                return InitializeResponse(connection);
-            };
-
-            return ProcessMessages(connection, afterReceive);
+                State = state;
+                Transport = foreverTransport;
+            }
         }
 
-        private Task ProcessMessages(ITransportConnection connection, Func<Task> postReceive = null)
+        private class MessageContext
         {
-            var tcs = new TaskCompletionSource<object>();
+            public ForeverTransport Transport;
+            public RequestLifetime Lifetime;
+            public IDisposable Registration;
 
-            Action<Exception> endRequest = (ex) =>
+            public MessageContext(ForeverTransport transport, RequestLifetime lifetime, IDisposable registration)
             {
-                if (ex != null)
-                {
-                    tcs.TrySetException(ex);
-                }
-                else
-                {
-                    tcs.TrySetResult(null);
-                }
-
-                CompleteRequest();
-            };
-
-            ProcessMessages(connection, postReceive, endRequest);
-
-            return tcs.Task;
+                Registration = registration;
+                Lifetime = lifetime;
+                Transport = transport;
+            }
         }
 
-        private void ProcessMessages(ITransportConnection connection, Func<Task> postReceive, Action<Exception> endRequest)
+        private class RequestLifetime
         {
-            IDisposable subscription = null;
-            var wh = new ManualResetEventSlim(initialState: false);
-            var registration = default(CancellationTokenRegistration);
-            bool disposeSubscriptionImmediately = false;
+            private readonly HttpRequestLifeTime _lifetime;
+            private readonly ForeverTransport _transport;
 
-            try
+            public RequestLifetime(ForeverTransport transport, HttpRequestLifeTime lifetime)
             {
-                // End the request if the connection end token is triggered
-                registration = ConnectionEndToken.Register(() =>
+                _lifetime = lifetime;
+                _transport = transport;
+            }
+
+            public void Complete()
+            {
+                Complete(error: null);
+            }
+
+            public void Complete(Exception error)
+            {
+                _lifetime.Complete(error);
+
+                _transport.Dispose();
+
+                if (_transport.AfterRequestEnd != null)
                 {
-                    wh.Wait();
-
-                    // This is only null if we failed to create the subscription
-                    if (subscription != null)
-                    {
-                        subscription.Dispose();
-                    }
-                });
-            }
-            catch (ObjectDisposedException)
-            {
-                // If we've ended the connection before we got a chance to register the connection
-                // then dispose the subscription immediately
-                disposeSubscriptionImmediately = true;
-            }
-
-            try
-            {
-                subscription = connection.Receive(LastMessageId, response =>
-                {
-                    // We need to wait until post receive has been called
-                    wh.Wait();
-
-                    response.TimedOut = IsTimedOut;
-
-                    // If we're telling the client to disconnect then clean up the instantiated connection.
-                    if (response.Disconnect)
-                    {
-                        // Send the response before removing any connection data
-                        return Send(response).Then(() =>
-                        {
-                            // Remove connection without triggering disconnect
-                            HeartBeat.RemoveConnection(this);
-
-                            endRequest(null);
-
-                            // Dispose everything
-                            registration.Dispose();
-                            subscription.Dispose();
-
-                            return TaskAsyncHelper.False;
-                        });
-                    }
-                    else if (response.TimedOut ||
-                             response.Aborted ||
-                             ConnectionEndToken.IsCancellationRequested)
-                    {
-                        if (response.Aborted)
-                        {
-                            // If this was a clean disconnect raise the event.
-                            OnDisconnect();
-                        }
-
-                        endRequest(null);
-
-                        // Dispose everything
-                        registration.Dispose();
-                        subscription.Dispose();
-
-                        return TaskAsyncHelper.False;
-                    }
-                    else
-                    {
-                        return Send(response).Then(() => TaskAsyncHelper.True);
-                    }
-                },
-                MaxMessages);
-            }
-            catch (Exception ex)
-            {
-                endRequest(ex);
-
-                wh.Set();
-
-                registration.Dispose();
-
-                return;
-            }
-
-            if (postReceive != null)
-            {
-                postReceive().Catch(_counters.ErrorsAllTotal, _counters.ErrorsAllPerSec)
-                             .Catch(ex => endRequest(ex))
-                             .ContinueWith(task => wh.Set());
-            }
-            else
-            {
-                wh.Set();
-            }
-
-            if (disposeSubscriptionImmediately)
-            {
-                subscription.Dispose();
+                    _transport.AfterRequestEnd(error);
+                }
             }
         }
     }

@@ -3,13 +3,16 @@
 using System;
 using Newtonsoft.Json.Linq;
 using Microsoft.AspNet.SignalR.Client.Infrastructure;
-
+using Microsoft.AspNet.SignalR.Infrastructure;
+using System.Collections.Generic;
+#if !PORTABLE
 namespace Microsoft.AspNet.SignalR.Client.Hubs
 {
     /// <summary>
     /// <see cref="T:System.IObservable{object[]}"/> implementation of a hub event.
     /// </summary>
-    public class Hubservable : IObservable<JToken[]>
+
+    public class Hubservable : IObservable<IList<JToken>>
     {
         private readonly string _eventName;
         private readonly IHubProxy _proxy;
@@ -20,15 +23,16 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
             _eventName = eventName;
         }
 
-        public IDisposable Subscribe(IObserver<JToken[]> observer)
+        public IDisposable Subscribe(IObserver<IList<JToken>> observer)
         {
             var subscription = _proxy.Subscribe(_eventName);
-            subscription.Data += observer.OnNext;
+            subscription.Received += observer.OnNext;
 
             return new DisposableAction(() =>
             {
-                subscription.Data -= observer.OnNext;
+                subscription.Received -= observer.OnNext;
             });
         }
     }
 }
+#endif

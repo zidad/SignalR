@@ -30,6 +30,11 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
             _buffer.Append(Encoding.UTF8.GetString(buffer, 0, length));
         }
 
+        public void Add(ArraySegment<byte> buffer)
+        {
+            _buffer.Append(Encoding.UTF8.GetString(buffer.Array, buffer.Offset, buffer.Count));
+        }
+
         public string ReadLine()
         {
             // Lock while reading so that we can make safe assuptions about the buffer indicies
@@ -40,11 +45,8 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
                     _buffer.Remove(0, _offset + 1);
 
                     string line = _lineBuilder.ToString().Trim();
-#if WINDOWS_PHONE || NET35
-                    _lineBuilder.Length = 0;
-#else
                     _lineBuilder.Clear();
-#endif
+
                     _offset = 0;
                     return line;
                 }

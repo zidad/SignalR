@@ -2,7 +2,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using Microsoft.AspNet.SignalR.Json;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Hubs
@@ -11,26 +14,55 @@ namespace Microsoft.AspNet.SignalR.Hubs
     {
         private static readonly IJsonValue[] _emptyArgs = new IJsonValue[0];
 
-        public HubRequest Parse(string data)
+        public HubRequest Parse(string data, JsonSerializer serializer)
         {
-            var rawRequest = JObject.Parse(data);
+            var deserializedData = serializer.Parse<HubInvocation>(data);
+
             var request = new HubRequest();
 
-            // TODO: Figure out case insensitivity in JObject.Parse, this should cover our clients for now
-            request.Hub = rawRequest.Value<string>("hub") ?? rawRequest.Value<string>("Hub");
-            request.Method = rawRequest.Value<string>("method") ?? rawRequest.Value<string>("Method");
-            request.Id = rawRequest.Value<string>("id") ?? rawRequest.Value<string>("Id");
-
-            var rawState = rawRequest["state"] ?? rawRequest["State"];
-            request.State = rawState == null ? new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) :
-                                       rawState.ToObject<IDictionary<string, object>>();
-
-            var rawArgs = rawRequest["args"] ?? rawRequest["Args"];
-            request.ParameterValues = rawArgs == null ? _emptyArgs :
-                                                rawArgs.Children().Select(value => new JTokenValue(value)).ToArray();
+            request.Hub = deserializedData.Hub;
+            request.Method = deserializedData.Method;
+            request.Id = deserializedData.Id;
+            request.State = GetState(deserializedData);
+            request.ParameterValues = (deserializedData.Args != null) ? deserializedData.Args.Select(value => new JRawValue(value)).ToArray() : _emptyArgs;
 
             return request;
         }
 
+        [SuppressMessage("Microsoft.Performance", "CA1812:AvoidUninstantiatedInternalClasses", Justification = "This type is used for deserialzation")]
+        private class HubInvocation
+        {
+            [JsonProperty("H")]
+            public string Hub { get; set; }
+            [JsonProperty("M")]
+            public string Method { get; set; }
+            [JsonProperty("I")]
+            public string Id { get; set; }
+            [JsonProperty("S")]
+            public JRaw State { get; set; }
+            [JsonProperty("A")]
+            public JRaw[] Args { get; set; }
+        }
+
+        private static IDictionary<string, object> GetState(HubInvocation deserializedData)
+        {
+            if (deserializedData.State == null)
+            {
+                return new Dictionary<string, object>();
+            }
+
+            // Get the raw JSON string and check if it's over 4K
+            string json = deserializedData.State.ToString();
+
+            if (json.Length > 4096)
+            {
+                throw new InvalidOperationException(Resources.Error_StateExceededMaximumLength);
+            }
+
+            var settings = JsonUtility.CreateDefaultSerializerSettings();
+            settings.Converters.Add(new SipHashBasedDictionaryConverter());
+            var serializer = JsonSerializer.Create(settings);
+            return serializer.Parse<IDictionary<string, object>>(json);
+        }
     }
 }

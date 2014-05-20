@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using Microsoft.AspNet.SignalR.Json;
+using Microsoft.AspNet.SignalR.Messaging;
+using Microsoft.AspNet.SignalR.Transports;
 using Xunit;
 
 namespace Microsoft.AspNet.SignalR.Tests
@@ -12,14 +15,11 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             // Arrange
             var writer = new StringWriter();
-            var response = new PersistentResponse(m => m.Key == "key2");
-            response.Messages = new List<ArraySegment<Message>>();
-            response.TransportData = new Dictionary<string, object>();
-            response.TransportData["Groups"] = new List<string>
+            var response = new PersistentResponse(m => m.Key == "key2", w =>
             {
-                "g1"
-            };
-            response.MessageId = "Baz";
+                w.Write("Baz");
+            });
+            response.Messages = new List<ArraySegment<Message>>();
             response.Messages.Add(new ArraySegment<Message>(new[] { new Message("1", "key", "value1"), 
                                                                     new Message("1", "key2", "value2") }, 0, 2));
 
@@ -27,7 +27,7 @@ namespace Microsoft.AspNet.SignalR.Tests
             ((IJsonWritable)response).WriteJson(writer);
 
             // Assert
-            Assert.Equal(@"{""MessageId"":""Baz"",""Disconnect"":false,""TimedOut"":false,""TransportData"":{""Groups"":[""g1""]},""Messages"":[value1]}", writer.ToString());
+            Assert.Equal(@"{""C"":""Baz"",""M"":[value1]}", writer.ToString());
         }
 
         [Fact]
@@ -35,14 +35,11 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             // Arrange
             var writer = new StringWriter();
-            var response = new PersistentResponse(m => false);
-            response.Messages = new List<ArraySegment<Message>>();
-            response.TransportData = new Dictionary<string, object>();
-            response.TransportData["Groups"] = new List<string>
+            var response = new PersistentResponse(m => false, w =>
             {
-                "g1"
-            };
-            response.MessageId = "Baz";
+                w.Write("Baz");
+            });
+            response.Messages = new List<ArraySegment<Message>>();
             response.Messages.Add(new ArraySegment<Message>(new[] { new Message("1", "key", "value1") { CommandId = "something"}, 
                                                                     new Message("1", "key2", "value2") }, 0, 2));
 
@@ -50,7 +47,7 @@ namespace Microsoft.AspNet.SignalR.Tests
             ((IJsonWritable)response).WriteJson(writer);
 
             // Assert
-            Assert.Equal(@"{""MessageId"":""Baz"",""Disconnect"":false,""TimedOut"":false,""TransportData"":{""Groups"":[""g1""]},""Messages"":[value2]}", writer.ToString());
+            Assert.Equal(@"{""C"":""Baz"",""M"":[value2]}", writer.ToString());
         }
 
         [Fact]
@@ -58,10 +55,11 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             // Arrange
             var writer = new StringWriter();
-            var response = new PersistentResponse(m => m.Key == "key2");
-            response.TransportData = new Dictionary<string, object>();
+            var response = new PersistentResponse(m => m.Key == "key2", w =>
+            {
+                w.Write("Baz");
+            });
             response.Messages = new List<ArraySegment<Message>>();
-            response.MessageId = "Baz";
             response.Messages.Add(new ArraySegment<Message>(new[] { new Message("1", "key", "value1"), 
                                                                     new Message("1", "key2", "value2") }, 0, 2));
 
@@ -69,7 +67,7 @@ namespace Microsoft.AspNet.SignalR.Tests
             ((IJsonWritable)response).WriteJson(writer);
 
             // Assert
-            Assert.Equal(@"{""MessageId"":""Baz"",""Disconnect"":false,""TimedOut"":false,""TransportData"":{},""Messages"":[value1]}", writer.ToString());
+            Assert.Equal(@"{""C"":""Baz"",""M"":[value1]}", writer.ToString());
         }
 
         [Fact]
@@ -77,9 +75,11 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             // Arrange
             var writer = new StringWriter();
-            var response = new PersistentResponse(m => m.Key == "key2");
+            var response = new PersistentResponse(m => m.Key == "key2", w =>
+            {
+                w.Write("Baz");
+            });
             response.Messages = new List<ArraySegment<Message>>();
-            response.MessageId = "Baz";
             response.Messages.Add(new ArraySegment<Message>(new[] { new Message("1", "key", "value1"), 
                                                                     new Message("1", "key2", "value2") }, 0, 2));
 
@@ -87,7 +87,7 @@ namespace Microsoft.AspNet.SignalR.Tests
             ((IJsonWritable)response).WriteJson(writer);
 
             // Assert
-            Assert.Equal(@"{""MessageId"":""Baz"",""Disconnect"":false,""TimedOut"":false,""Messages"":[value1]}", writer.ToString());
+            Assert.Equal(@"{""C"":""Baz"",""M"":[value1]}", writer.ToString());
         }
     }
 }

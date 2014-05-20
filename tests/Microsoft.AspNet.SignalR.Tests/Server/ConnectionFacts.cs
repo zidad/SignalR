@@ -2,6 +2,10 @@
 using Moq;
 using Microsoft.AspNet.SignalR.Infrastructure;
 using Xunit;
+using Microsoft.AspNet.SignalR.Json;
+using Microsoft.AspNet.SignalR.Messaging;
+using Microsoft.AspNet.SignalR.Tracing;
+using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR.Tests.Server
 {
@@ -19,7 +23,7 @@ namespace Microsoft.AspNet.SignalR.Tests.Server
                 return TaskAsyncHelper.Empty;
             });
 
-            var serializer = new JsonNetSerializer();
+            var serializer = JsonUtility.CreateDefaultSerializer();
             var traceManager = new Mock<ITraceManager>();
             var connection = new Connection(messageBus.Object,
                                             serializer,
@@ -28,21 +32,22 @@ namespace Microsoft.AspNet.SignalR.Tests.Server
                                             new[] { "a", "signal", "connectionid" },
                                             new string[] { },
                                             traceManager.Object,
-                                            new AckHandler(cancelAcksOnTimeout: false, 
+                                            new AckHandler(completeAcksOnTimeout: false,
                                                            ackThreshold: TimeSpan.Zero,
                                                            ackInterval: TimeSpan.Zero),
-                                            counters);
+                                            counters,
+                                            new Mock<IProtectedData>().Object);
 
             connection.Send("a", new Command
             {
-                Type = CommandType.AddToGroup,
+                CommandType = CommandType.AddToGroup,
                 Value = "foo"
             });
 
             Assert.NotNull(message);
             Assert.True(message.IsCommand);
-            var command = serializer.Parse<Command>(message.Value);
-            Assert.Equal(CommandType.AddToGroup, command.Type);
+            var command = serializer.Parse<Command>(message.Value, message.Encoding);
+            Assert.Equal(CommandType.AddToGroup, command.CommandType);
             Assert.Equal("foo", command.Value);
         }
     }

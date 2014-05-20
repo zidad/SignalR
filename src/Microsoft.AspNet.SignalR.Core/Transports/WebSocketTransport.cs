@@ -1,32 +1,60 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
-using Microsoft.AspNet.SignalR.Infrastructure;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Configuration;
+using Microsoft.AspNet.SignalR.Hosting;
+using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Json;
+using Microsoft.AspNet.SignalR.Owin;
+using Microsoft.AspNet.SignalR.Tracing;
+using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
+    using WebSocketFunc = Func<IDictionary<string, object>, Task>;
+
     public class WebSocketTransport : ForeverTransport
     {
         private readonly HostContext _context;
         private IWebSocket _socket;
         private bool _isAlive = true;
-        
+
+        private readonly int? _maxIncomingMessageSize;
+
+        private readonly Action<string> _message;
+        private readonly Action _closed;
+        private readonly Action<Exception> _error;
+
         public WebSocketTransport(HostContext context,
                                   IDependencyResolver resolver)
-            : this(context, 
-                   resolver.Resolve<IJsonSerializer>(),
-                   resolver.Resolve<ITransportHeartBeat>(),
-                   resolver.Resolve<IPerformanceCounterManager>())
+            : this(context,
+                   resolver.Resolve<JsonSerializer>(),
+                   resolver.Resolve<ITransportHeartbeat>(),
+                   resolver.Resolve<IPerformanceCounterManager>(),
+                   resolver.Resolve<ITraceManager>(),
+                   resolver.Resolve<IConfigurationManager>().MaxIncomingWebSocketMessageSize)
         {
         }
 
-        public WebSocketTransport(HostContext context, 
-                                  IJsonSerializer serializer, 
-                                  ITransportHeartBeat heartBeat,
-                                  IPerformanceCounterManager performanceCounterWriter)
-            : base(context, serializer, heartBeat, performanceCounterWriter)
+        public WebSocketTransport(HostContext context,
+                                  JsonSerializer serializer,
+                                  ITransportHeartbeat heartbeat,
+                                  IPerformanceCounterManager performanceCounterWriter,
+                                  ITraceManager traceManager,
+                                  int? maxIncomingMessageSize)
+            : base(context, serializer, heartbeat, performanceCounterWriter, traceManager)
         {
             _context = context;
+            _maxIncomingMessageSize = maxIncomingMessageSize;
+
+            _message = OnMessage;
+            _closed = OnClosed;
+            _error = OnSocketError;
         }
 
         public override bool IsAlive
@@ -37,56 +65,132 @@ namespace Microsoft.AspNet.SignalR.Transports
             }
         }
 
+        public override CancellationToken CancellationToken
+        {
+            get
+            {
+                return CancellationToken.None;
+            }
+        }
+
         public override Task KeepAlive()
         {
-            return Send(new object());
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return EnqueueOperation(state =>
+            {
+                var webSocket = (IWebSocket)state;
+                return webSocket.Send("{}");
+            },
+            _socket);
         }
 
         public override Task ProcessRequest(ITransportConnection connection)
         {
-            return _context.Request.AcceptWebSocketRequest(socket =>
+            if (IsAbortRequest)
             {
-                _socket = socket;
-
-                socket.OnClose = clean =>
+                return connection.Abort(ConnectionId);
+            }
+            else
+            {
+                return AcceptWebSocketRequest(socket =>
                 {
-                    // If we performed a clean disconnect then we go through the normal disconnect routine.  However,
-                    // If we performed an unclean disconnect we want to mark the connection as "not alive" and let the
-                    // HeartBeat clean it up.  This is to maintain consistency across the transports.
-                    if (clean)
-                    {
-                        OnDisconnect();
-                    }
+                    _socket = socket;
+                    socket.OnClose = _closed;
+                    socket.OnMessage = _message;
+                    socket.OnError = _error;
 
-                    _isAlive = false;
-                };
+                    return ProcessRequestCore(connection);
+                });
+            }
+        }
 
-                socket.OnMessage = message =>
-                {
-                    OnReceiving(message);
-
-                    if (Received != null)
-                    {
-                        Received(message).Catch();
-                    }
-                };
-
-                return ProcessRequestCore(connection);
-            });
+        protected override TextWriter CreateResponseWriter()
+        {
+            return new BinaryTextWriter(_socket);
         }
 
         public override Task Send(object value)
         {
-            var data = JsonSerializer.Stringify(value);
+            var context = new WebSocketTransportContext(this, value);
 
-            OnSending(data);
-
-            return _socket.Send(data).Catch(IncrementErrorCounters);
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return EnqueueOperation(state => PerformSend(state), context);
         }
 
         public override Task Send(PersistentResponse response)
         {
+            OnSendingResponse(response);
+
             return Send((object)response);
+        }
+
+        private Task AcceptWebSocketRequest(Func<IWebSocket, Task> callback)
+        {
+            var accept = _context.Environment.Get<Action<IDictionary<string, object>, WebSocketFunc>>(OwinConstants.WebSocketAccept);
+
+            if (accept == null)
+            {
+                // Bad Request
+                _context.Response.StatusCode = 400;
+                return _context.Response.End(Resources.Error_NotWebSocketRequest);
+            }
+
+            var handler = new OwinWebSocketHandler(callback, _maxIncomingMessageSize);
+            accept(null, handler.ProcessRequest);
+            return TaskAsyncHelper.Empty;
+        }
+
+        private static async Task PerformSend(object state)
+        {
+            var context = (WebSocketTransportContext)state;
+
+            try
+            {
+                context.Transport.JsonSerializer.Serialize(context.State, context.Transport.OutputWriter);
+                context.Transport.OutputWriter.Flush();
+
+                await context.Transport._socket.Flush();
+            }
+            catch (Exception ex)
+            {
+                // OnError will close the socket in the event of a JSON serialization or flush error.
+                // The client should then immediately reconnect instead of simply missing keep-alives.
+                context.Transport.OnError(ex);
+                throw;
+            }
+        }
+
+        private void OnMessage(string message)
+        {
+            if (Received != null)
+            {
+                Received(message).Catch();
+            }
+        }
+
+        private void OnClosed()
+        {
+            Trace.TraceInformation("CloseSocket({0})", ConnectionId);
+
+            // Require a request to /abort to stop tracking the connection. #2195
+            _isAlive = false;
+        }
+
+        private void OnSocketError(Exception error)
+        {
+            Trace.TraceError("OnError({0}, {1})", ConnectionId, error);
+        }
+
+        private class WebSocketTransportContext
+        {
+            public WebSocketTransport Transport;
+            public object State;
+
+            public WebSocketTransportContext(WebSocketTransport transport, object state)
+            {
+                Transport = transport;
+                State = state;
+            }
         }
     }
 }

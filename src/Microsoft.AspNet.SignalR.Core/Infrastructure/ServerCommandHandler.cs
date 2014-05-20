@@ -2,18 +2,24 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Json;
+using Microsoft.AspNet.SignalR.Messaging;
+using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR.Infrastructure
 {
     /// <summary>
     /// Default <see cref="IServerCommandHandler"/> implementation.
     /// </summary>
-    public class ServerCommandHandler : IServerCommandHandler, ISubscriber
+    internal class ServerCommandHandler : IServerCommandHandler, ISubscriber, IDisposable
     {
         private readonly IMessageBus _messageBus;
         private readonly IServerIdManager _serverIdManager;
-        private readonly IJsonSerializer _serializer;
+        private readonly JsonSerializer _serializer;
+        private IDisposable _subscription;
+
         private const int MaxMessages = 10;
 
         // The signal for all signalr servers
@@ -23,12 +29,12 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         public ServerCommandHandler(IDependencyResolver resolver) :
             this(resolver.Resolve<IMessageBus>(),
                  resolver.Resolve<IServerIdManager>(),
-                 resolver.Resolve<IJsonSerializer>())
+                 resolver.Resolve<JsonSerializer>())
         {
 
         }
 
-        public ServerCommandHandler(IMessageBus messageBus, IServerIdManager serverIdManager, IJsonSerializer serializer)
+        public ServerCommandHandler(IMessageBus messageBus, IServerIdManager serverIdManager, JsonSerializer serializer)
         {
             _messageBus = messageBus;
             _serverIdManager = serverIdManager;
@@ -44,7 +50,7 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         }
 
 
-        public IEnumerable<string> EventKeys
+        public IList<string> EventKeys
         {
             get
             {
@@ -52,9 +58,27 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
             }
         }
 
-        public event Action<string> EventAdded;
+        event Action<ISubscriber, string> ISubscriber.EventKeyAdded
+        {
+            add
+            {
+            }
+            remove
+            {
+            }
+        }
 
-        public event Action<string> EventRemoved;
+        event Action<ISubscriber, string> ISubscriber.EventKeyRemoved
+        {
+            add
+            {
+            }
+            remove
+            {
+            }
+        }
+
+        public Action<TextWriter> WriteCursor { get; set; }
 
         public string Identity
         {
@@ -62,6 +86,12 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
             {
                 return _serverIdManager.ServerId;
             }
+        }
+        
+        public Subscription Subscription
+        {
+            get;
+            set;
         }
 
         public Task SendCommand(ServerCommand command)
@@ -73,20 +103,37 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
             return _messageBus.Publish(_serverIdManager.ServerId, ServerSignal, _serializer.Stringify(command));
         }
 
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_subscription != null)
+                {
+                    _subscription.Dispose();
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+        }
+
         private void ProcessMessages()
         {
             // Process messages that come from the bus for servers
-            _messageBus.Subscribe(this, cursor: null, callback: HandleServerCommands, maxMessages: MaxMessages);
+            _subscription = _messageBus.Subscribe(this, cursor: null, callback: HandleServerCommands, maxMessages: MaxMessages, state: null);
         }
 
-        private Task<bool> HandleServerCommands(MessageResult result)
+        private Task<bool> HandleServerCommands(MessageResult result, object state)
         {
-            result.Messages.Enumerate(m => ServerSignal.Equals(m.Key),
-                                      m =>
-                                      {
-                                          var command = _serializer.Parse<ServerCommand>(m.Value);
-                                          OnCommand(command);
-                                      });
+            result.Messages.Enumerate<object>(m => ServerSignal.Equals(m.Key),
+                                              (s, m) =>
+                                              {
+                                                  var command = _serializer.Parse<ServerCommand>(m.Value, m.Encoding);
+                                                  OnCommand(command);
+                                              },
+                                              state: null);
 
             return TaskAsyncHelper.True;
         }

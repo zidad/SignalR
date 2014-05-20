@@ -1,176 +1,882 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNet.SignalR.Client.Hubs;
+using Microsoft.AspNet.SignalR.Client;
+using Microsoft.AspNet.SignalR.Configuration;
 using Microsoft.AspNet.SignalR.Hosting.Memory;
 using Microsoft.AspNet.SignalR.Hubs;
+using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Tests.Common;
+using Microsoft.AspNet.SignalR.Tests.Common.Infrastructure;
 using Microsoft.AspNet.SignalR.Tests.Infrastructure;
+using Microsoft.AspNet.SignalR.Tests.Utilities;
 using Moq;
 using Newtonsoft.Json.Linq;
+using Owin;
 using Xunit;
+using Xunit.Extensions;
 
 namespace Microsoft.AspNet.SignalR.Tests
 {
-    public class HubFacts : IDisposable
+    public class HubFacts : HostedTest
     {
-        [Fact]
-        public void ReadingState()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void ReadingState(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize(messageBusType: messageBusType);
 
-                var hub = connection.CreateHubProxy("demo");
+                HubConnection connection = CreateHubConnection(host);
 
-                hub["name"] = "test";
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
 
-                connection.Start(host).Wait();
+                    hub["name"] = "test";
 
-                var result = hub.Invoke<string>("ReadStateValue").Result;
+                    connection.Start(host.Transport).Wait();
 
-                Assert.Equal("test", result);
+                    var result = hub.InvokeWithTimeout<string>("ReadStateValue");
 
-                connection.Stop();
+                    Assert.Equal("test", result);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void ReadingComplexState(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                var connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    hub["state"] = JToken.FromObject(new
+                    {
+                        Name = "David",
+                        Address = new
+                        {
+                            Street = "St"
+                        }
+                    });
+
+                    connection.Start(host.Transport).Wait();
+
+                    var result = hub.InvokeWithTimeout<dynamic>("ReadAnyState");
+                    dynamic state2 = hub["state2"];
+                    dynamic addy = hub["addy"];
+
+                    Assert.NotNull(result);
+                    Assert.NotNull(state2);
+                    Assert.NotNull(addy);
+                    Assert.Equal("David", (string)result.Name);
+                    Assert.Equal("St", (string)result.Address.Street);
+                    Assert.Equal("David", (string)state2.Name);
+                    Assert.Equal("St", (string)state2.Address.Street);
+                    Assert.Equal("St", (string)addy.Street);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.IISExpress, TransportType.Websockets)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling)]
+        public void BasicAuthCredentialsFlow(HostType hostType, TransportType transportType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize();
+
+                var connection = CreateHubConnection(host, path: "/basicauth/signalr", useDefaultUrl: false);
+                var proxy = connection.CreateHubProxy("AuthenticatedEchoHub");
+
+                var tcs = new TaskCompletionSource<string>();
+
+                using (connection)
+                {
+                    connection.Credentials = new System.Net.NetworkCredential("user", "password");
+
+                    proxy.On<string>("echo", data =>
+                    {
+                        tcs.TrySetResult(data);
+                    });
+
+                    connection.Start(host.Transport).Wait();
+
+                    proxy.InvokeWithTimeout("EchoCallback", "Hello World");
+
+                    Assert.True(tcs.Task.Wait(TimeSpan.FromSeconds(10)));
+                    Assert.Equal("Hello World", tcs.Task.Result);
+                }
             }
         }
 
         [Fact]
-        public void SettingState()
+        public async Task CanSendViaUser()
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Configure(app =>
+                {
+                    var resolver = new DefaultDependencyResolver();
+                    var config = new HubConfiguration
+                    {
+                        Resolver = resolver
+                    };
+                    var provider = new Mock<IUserIdProvider>();
+                    provider.Setup(m => m.GetUserId(It.IsAny<IRequest>()))
+                            .Returns<IRequest>(request =>
+                            {
+                                return request.QueryString["name"];
+                            });
 
-                var hub = connection.CreateHubProxy("demo");
-                connection.Start(host).Wait();
+                    config.Resolver.Register(typeof(IUserIdProvider), () => provider.Object);
+                    app.MapSignalR(config);
+                });
 
-                var result = hub.Invoke<string>("SetStateValue", "test").Result;
+                var qs = new Dictionary<string, string>
+                {
+                    { "name", "myuser" }
+                };
 
-                Assert.Equal("test", result);
-                Assert.Equal("test", hub["Company"]);
+                var wh = new ManualResetEventSlim();
 
-                connection.Stop();
+                using (var connection = new HubConnection("http://memoryhost", qs))
+                {
+                    var proxy = connection.CreateHubProxy("demo");
+
+                    proxy.On("invoke", () =>
+                    {
+                        wh.Set();
+                    });
+
+                    await connection.Start(host);
+
+                    await proxy.Invoke("SendToUser", "myuser");
+
+                    Assert.True(wh.Wait(TimeSpan.FromSeconds(5)));
+                }
             }
         }
 
         [Fact]
-        public void GetValueFromServer()
+        public async Task CanSendViaUserWhenPrincipalSet()
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Configure(app =>
+                {
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+                    app.Use((context, next) =>
+                    {
+                        var identity = new GenericIdentity("randomUserId");
+                        context.Request.User = new GenericPrincipal(identity, new string[0]);
+                        return next();
+                    });
 
-                var hub = connection.CreateHubProxy("demo");
+                    app.MapSignalR(config);
+                });
 
-                connection.Start(host).Wait();
+                var wh = new ManualResetEventSlim();
 
-                var result = hub.Invoke<int>("GetValue").Result;
+                using (var connection = new HubConnection("http://memoryhost"))
+                {
+                    var proxy = connection.CreateHubProxy("demo");
 
-                Assert.Equal(10, result);
-                connection.Stop();
+                    proxy.On("invoke", () =>
+                    {
+                        wh.Set();
+                    });
+
+                    await connection.Start(host);
+
+                    await proxy.Invoke("SendToUser", "randomUserId");
+
+                    Assert.True(wh.Wait(TimeSpan.FromSeconds(5)));
+                }
             }
         }
 
         [Fact]
-        public void TaskWithException()
+        public async Task SendToUser()
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(HostType.IISExpress))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize();
 
-                var hub = connection.CreateHubProxy("demo");
+                var connection1 = CreateAuthHubConnection(host, "user1", "password");
+                var connection2 = CreateAuthHubConnection(host, "user1", "password");
+                var connection3 = CreateAuthHubConnection(host, "user1", "password");
+                var connection4 = CreateAuthHubConnection(host, "user2", "password");
+                
+                var wh1 = new ManualResetEventSlim();
+                var wh2 = new ManualResetEventSlim();
+                var wh3 = new ManualResetEventSlim();
+                var wh4 = new ManualResetEventSlim();
 
-                connection.Start(host).Wait();
+                var hub1 = connection1.CreateHubProxy("AuthenticatedEchoHub");
+                var hub2 = connection2.CreateHubProxy("AuthenticatedEchoHub");
+                var hub3 = connection3.CreateHubProxy("AuthenticatedEchoHub");
+                var hub4 = connection4.CreateHubProxy("AuthenticatedEchoHub");
+                hub1.On("echo", () => wh1.Set());
+                hub2.On("echo", () => wh2.Set());
+                hub3.On("echo", () => wh3.Set());
+                hub4.On("echo", () => wh4.Set());
 
-                var ex = Assert.Throws<AggregateException>(() => hub.Invoke("TaskWithException").Wait());
+                using (connection1)
+                {
+                    using (connection2)
+                    {
+                        using (connection3)
+                        {
+                            using (connection4)
+                            {
+                                await connection1.Start(new Microsoft.AspNet.SignalR.Client.Transports.WebSocketTransport());
+                                await connection2.Start(new Microsoft.AspNet.SignalR.Client.Transports.ServerSentEventsTransport());
+                                await connection3.Start(new Microsoft.AspNet.SignalR.Client.Transports.LongPollingTransport());
+                                await connection4.Start();
 
-                Assert.IsType<InvalidOperationException>(ex.GetBaseException());
-                Assert.Contains("System.Exception", ex.GetBaseException().Message);
-                connection.Stop();
+                                await hub4.Invoke("SendToUser", "user1", "message");
+
+                                Assert.True(wh1.Wait(TimeSpan.FromSeconds(5)));
+                                Assert.True(wh2.Wait(TimeSpan.FromSeconds(5)));
+                                Assert.True(wh3.Wait(TimeSpan.FromSeconds(5)));
+                                Assert.False(wh4.Wait(TimeSpan.FromSeconds(5)));
+                            }
+                        }
+                    }
+                }
             }
         }
 
         [Fact]
-        public void GenericTaskWithException()
+        public async Task SendToUserConnectDisconnectEvents()
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(HostType.IISExpress))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize();
 
-                var hub = connection.CreateHubProxy("demo");
+                var connection1 = CreateAuthHubConnection(host, "user1", "password");
+                var connection2 = CreateAuthHubConnection(host, "user2", "password");
 
-                connection.Start(host).Wait();
+                int connected = 0;
+                int disconnected = 0;
+                var wh1 = new AsyncManualResetEvent();
+                var wh2 = new AsyncManualResetEvent();
 
-                var ex = Assert.Throws<AggregateException>(() => hub.Invoke("GenericTaskWithException").Wait());
+                var hub1 = connection1.CreateHubProxy("AuthenticatedEchoHub");
+                var hub2 = connection2.CreateHubProxy("AuthenticatedEchoHub");
+                hub1.On<string>("SendUserOnConnected", (user) => 
+                {
+                    if (++connected >= 2)
+                    {
+                        wh1.Set();
+                    }
+                });
+                hub1.On<string>("SendUserOnDisconnected", (user) =>
+                {
+                    if (++disconnected >= 1)
+                    {
+                        wh2.Set();
+                    }
+                });
 
-                Assert.IsType<InvalidOperationException>(ex.GetBaseException());
-                Assert.Contains("System.Exception", ex.GetBaseException().Message);
+                using (connection1)
+                {
+                    using (connection2)
+                    {
+                            await connection1.Start();
+                            await connection2.Start(new Microsoft.AspNet.SignalR.Client.Transports.WebSocketTransport());
+
+                            Assert.True(await wh1.WaitAsync(TimeSpan.FromSeconds(5)));
+                    }
+
+                    Assert.True(await wh2.WaitAsync(TimeSpan.FromSeconds(5)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets)]
+        public void VerifyOwinContext(HostType hostType, TransportType transportType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize();
+
+                HubConnection connection = CreateHubConnection(host);
+                HubConnection connection2 = CreateHubConnection(host);
+
+                var hub = connection.CreateHubProxy("MyItemsHub");
+                var hub1 = connection2.CreateHubProxy("MyItemsHub");
+
+                var results = new List<RequestItemsResponse>();
+                hub1.On<RequestItemsResponse>("update", result =>
+                {
+                    if (!results.Contains(result))
+                    {
+                        results.Add(result);
+                    }
+                });
+
+                connection.Start(host.TransportFactory()).Wait();
+                connection2.Start(host.TransportFactory()).Wait();
+
+                Thread.Sleep(TimeSpan.FromSeconds(2));
+
+                hub1.InvokeWithTimeout("GetItems");
+
+                Thread.Sleep(TimeSpan.FromSeconds(2));
+
                 connection.Stop();
+
+                Thread.Sleep(TimeSpan.FromSeconds(2));
+
+                Debug.WriteLine(String.Join(", ", results));
+
+                Assert.Equal(3, results.Count);
+                Assert.Equal("OnConnected", results[0].Method);
+                Assert.NotNull(results[0].Headers);
+                Assert.NotNull(results[0].Query);
+                Assert.True(results[0].Headers.Count > 0);
+                Assert.True(results[0].Query.Count > 0);
+                Assert.True(results[0].OwinKeys.Length > 0);
+                Assert.Equal("nosniff", results[0].XContentTypeOptions);
+                Assert.Equal("GetItems", results[1].Method);
+                Assert.NotNull(results[1].Headers);
+                Assert.NotNull(results[1].Query);
+                Assert.True(results[1].Headers.Count > 0);
+                Assert.True(results[1].Query.Count > 0);
+                Assert.True(results[1].OwinKeys.Length > 0);
+                Assert.Equal("OnDisconnected", results[2].Method);
+                Assert.NotNull(results[2].Headers);
+                Assert.NotNull(results[2].Query);
+                Assert.True(results[2].Headers.Count > 0);
+                Assert.True(results[2].Query.Count > 0);
+                Assert.True(results[2].OwinKeys.Length > 0);
+
+                connection2.Stop();
             }
         }
 
         [Fact]
-        public void GenericTaskWithContinueWith()
+        public async Task HttpHandlersAreNotSetInIISIntegratedPipeline()
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(HostType.IISExpress, TransportType.LongPolling))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize();
+                HubConnection connection = CreateHubConnection(host, "/session");
 
-                var hub = connection.CreateHubProxy("demo");
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+                    await connection.Start(host.Transport);
 
-                connection.Start(host).Wait();
+                    var result = await hub.Invoke<string>("GetHttpContextHandler");
 
-                int result = hub.Invoke<int>("GenericTaskWithContinueWith").Result;
-
-                Assert.Equal(4, result);
-                connection.Stop();
+                    Assert.Null(result);
+                }
             }
         }
 
-        [Fact]
-        public void Overloads()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SettingState(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
 
-                var hub = connection.CreateHubProxy("demo");
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+                    connection.Start(host.Transport).Wait();
 
-                connection.Start(host).Wait();
+                    var result = hub.InvokeWithTimeout<string>("SetStateValue", "test");
 
-                hub.Invoke("Overload").Wait();
-                int n = hub.Invoke<int>("Overload", 1).Result;
-
-                Assert.Equal(1, n);
-                connection.Stop();
+                    Assert.Equal("test", result);
+                    Assert.Equal("test", hub["Company"]);
+                }
             }
         }
 
-        [Fact]
-        public void UnsupportedOverloads()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        public void CancelledTask(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
 
-                var hub = connection.CreateHubProxy("demo");
+                using (connection)
+                {
+                    var tcs = new TaskCompletionSource<object>();
 
-                connection.Start(host).Wait();
+                    var hub = connection.CreateHubProxy("demo");
+                    connection.Start(host.Transport).Wait();
 
-                var ex = Assert.Throws<InvalidOperationException>(() => hub.Invoke("UnsupportedOverload", 13177).Wait());
+                    hub.Invoke("CancelledTask").ContinueWith(tcs);
 
-                Assert.Equal("'UnsupportedOverload' method could not be resolved.", ex.GetBaseException().Message);
-                connection.Stop();
+                    try
+                    {
+                        tcs.Task.Wait(TimeSpan.FromSeconds(10));
+                        Assert.True(false, "Didn't fault");
+                    }
+                    catch (Exception)
+                    {
+
+                    }
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        public void CancelledGenericTask(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var tcs = new TaskCompletionSource<object>();
+
+                    var hub = connection.CreateHubProxy("demo");
+                    connection.Start(host.Transport).Wait();
+
+                    hub.Invoke("CancelledGenericTask").ContinueWith(tcs);
+
+                    try
+                    {
+                        tcs.Task.Wait(TimeSpan.FromSeconds(10));
+                        Assert.True(false, "Didn't fault");
+                    }
+                    catch (Exception)
+                    {
+
+                    }
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void GetValueFromServer(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    var result = hub.InvokeWithTimeout<int>("GetValue");
+
+                    Assert.Equal(10, result);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SynchronousException(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    var ex = Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("SynchronousException"));
+
+                    Assert.IsType<InvalidOperationException>(ex.GetBaseException());
+                    Assert.Contains("System.Exception", ex.GetBaseException().Message);
+                }
+            }
+        }
+
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void TaskWithException(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    var ex = Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("TaskWithException"));
+
+                    Assert.IsType<InvalidOperationException>(ex.GetBaseException());
+                    Assert.Contains("System.Exception", ex.GetBaseException().Message);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void GenericTaskWithException(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    var ex = Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("GenericTaskWithException"));
+
+                    Assert.IsType<InvalidOperationException>(ex.GetBaseException());
+                    Assert.Contains("System.Exception", ex.GetBaseException().Message);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling, MessageBusType.Default)]
+        public void DetailedErrorsAreDisabledByDefault(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                using (var connection = CreateHubConnection(host, "/signalr2/test", useDefaultUrl: false))
+                {
+                    connection.TraceWriter = host.ClientTraceOutput;
+
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.TransportFactory()).Wait();
+
+                    var ex = Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("TaskWithException"));
+
+                    Assert.IsType<InvalidOperationException>(ex.GetBaseException());
+                    Assert.DoesNotContain("System.Exception", ex.GetBaseException().Message);
+                    Assert.Contains("demo.TaskWithException", ex.GetBaseException().Message);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling, MessageBusType.Default)]
+        public async Task DetailedErrorsAreAlwaysGivenForHubExceptions(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                using (var connection = CreateHubConnection(host, "/signalr2/test", useDefaultUrl: false))
+                {
+                    connection.TraceWriter = host.ClientTraceOutput;
+
+                    var hub = connection.CreateHubProxy("demo");
+
+                    await connection.Start(host.TransportFactory());
+
+                    var ex = Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("HubException"));
+
+                    Assert.IsType<Client.HubException>(ex.GetBaseException());
+
+                    var hubEx = (Client.HubException)ex.GetBaseException();
+
+                    Assert.Equal("message", hubEx.Message);
+                    Assert.Equal("errorData", (string)hubEx.ErrorData);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling, MessageBusType.Default)]
+        public async Task DetailedErrorsAreAlwaysGivenForHubExceptionsWithoutErrorData(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                using (var connection = CreateHubConnection(host, "/signalr2/test", useDefaultUrl: false))
+                {
+                    connection.TraceWriter = host.ClientTraceOutput;
+
+                    var hub = connection.CreateHubProxy("demo");
+
+                    await connection.Start(host.TransportFactory());
+
+                    var ex = Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("HubExceptionWithoutErrorData"));
+
+                    Assert.IsType<Client.HubException>(ex.GetBaseException());
+
+                    var hubEx = (Client.HubException)ex.GetBaseException();
+
+                    Assert.Equal("message", hubEx.Message);
+                    Assert.Null(hubEx.ErrorData);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void GenericTaskWithContinueWith(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    int result = hub.InvokeWithTimeout<int>("GenericTaskWithContinueWith");
+
+                    Assert.Equal(4, result);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void Overloads(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    hub.InvokeWithTimeout("Overload");
+                    int n = hub.InvokeWithTimeout<int>("Overload", 1);
+
+                    Assert.Equal(1, n);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling, MessageBusType.Default)]
+        public void ReturnDataWithPlus(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("echoHub");
+
+                    connection.Start(host.Transport).Wait();
+
+                    string result = hub.InvokeWithTimeout<string>("EchoReturn", "+");
+
+                    Assert.Equal("+", result);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling, MessageBusType.Default)]
+        public void CallbackDataWithPlus(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("echoHub");
+                    var tcs = new TaskCompletionSource<string>();
+                    hub.On<string>("echo", tcs.SetResult);
+
+                    connection.Start(host.Transport).Wait();
+
+                    hub.InvokeWithTimeout("EchoCallback", "+");
+
+                    Assert.True(tcs.Task.Wait(TimeSpan.FromSeconds(5)), "Timeout waiting for callback");
+                    Assert.Equal("+", tcs.Task.Result);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void UnsupportedOverloads(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    TestUtilities.AssertAggregateException<InvalidOperationException>(() => hub.InvokeWithTimeout("UnsupportedOverload", 13177), "'UnsupportedOverload' method could not be resolved.");
+                }
             }
         }
 
@@ -179,52 +885,156 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs("/foo");
-                var connection = new Client.Hubs.HubConnection("http://site/foo", useDefaultUrl: false);
-
-                var hub = connection.CreateHubProxy("demo");
-
-                var wh = new ManualResetEvent(false);
-
-                hub.On("signal", id =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var config = new HubConfiguration()
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    app.MapSignalR("/foo", config);
                 });
 
-                connection.Start(host).Wait();
+                var connection = new HubConnection("http://site/foo", useDefaultUrl: false, queryString: new Dictionary<string, string> { { "test", "ChangeHubUrl" } });
 
-                hub.Invoke("DynamicTask").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(5)));
-                connection.Stop();
+                    var wh = new ManualResetEventSlim(false);
+
+                    hub.On("signal", id =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("DynamicTask");
+
+                    Assert.True(wh.Wait(TimeSpan.FromSeconds(10)));
+                }
             }
         }
 
-        [Fact]
-        public void GuidTest()
+        [Theory]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets)]
+        public void ChangeHubUrlAspNet(HostType hostType, TransportType transportType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://site/");
+                host.Initialize();
+                var query = new Dictionary<string, string> { { "test", GetTestName() } };
+                SetHostData(host, query);
 
-                var hub = connection.CreateHubProxy("demo");
+                var connection = new HubConnection(host.Url + "/signalr2/test", useDefaultUrl: false, queryString: query);
 
-                var wh = new ManualResetEvent(false);
-
-                hub.On<Guid>("TestGuid", id =>
+                using (connection)
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
-                });
+                    connection.TraceWriter = host.ClientTraceOutput;
 
-                connection.Start(host).Wait();
+                    var hub = connection.CreateHubProxy("demo");
 
-                hub.Invoke("TestGuid").Wait();
+                    var wh = new ManualResetEventSlim(false);
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(5)));
-                connection.Stop();
+                    hub.On("signal", id =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host.Transport).Wait();
+
+                    hub.InvokeWithTimeout("DynamicTask");
+
+                    Assert.True(wh.Wait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        public void GuidTest(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    var wh = new ManualResetEventSlim(false);
+
+                    hub.On<Guid>("TestGuid", id =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host.Transport).Wait();
+
+                    hub.InvokeWithTimeout("TestGuid");
+
+                    Assert.True(wh.Wait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets)]
+        public void RemainsConnectedWithHubsAppendedToUrl(HostType hostType, TransportType transportType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize();
+                var connection = CreateHubConnection(host, "/signalr/js", useDefaultUrl: false);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    var tcs = new TaskCompletionSource<object>();
+                    var testGuidInvocations = 0;
+
+                    hub.On<Guid>("TestGuid", id =>
+                    {
+                        testGuidInvocations++;
+                        if (testGuidInvocations < 2)
+                        {
+                            hub.Invoke("TestGuid").ContinueWithNotComplete(tcs);
+                        }
+                        else
+                        {
+                            tcs.SetResult(null);
+                        }
+                    });
+
+                    connection.Error += e => tcs.SetException(e);
+                    connection.Reconnecting += () => tcs.SetCanceled();
+
+                    connection.Start(host.Transport).Wait();
+
+                    hub.InvokeWithTimeout("TestGuid");
+
+                    Assert.True(tcs.Task.Wait(TimeSpan.FromSeconds(10)));
+                }
             }
         }
 
@@ -242,91 +1052,107 @@ namespace Microsoft.AspNet.SignalR.Tests
             Assert.True(type.GetMethod("OnReconnected") != null);
         }
 
-        [Fact]
-        public void ComplexPersonState()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void ComplexPersonState(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://site/");
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
 
-                var hub = connection.CreateHubProxy("demo");
-
-                var wh = new ManualResetEvent(false);
-
-                connection.Start(host).Wait();
-
-                var person = new SignalR.Samples.Hubs.DemoHub.DemoHub.Person
+                using (connection)
                 {
-                    Address = new SignalR.Samples.Hubs.DemoHub.DemoHub.Address
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host.Transport).Wait();
+
+                    var person = new SignalR.Samples.Hubs.DemoHub.DemoHub.Person
                     {
-                        Street = "Redmond",
-                        Zip = "98052"
-                    },
-                    Age = 25,
-                    Name = "David"
-                };
+                        Address = new SignalR.Samples.Hubs.DemoHub.DemoHub.Address
+                        {
+                            Street = "Redmond",
+                            Zip = "98052"
+                        },
+                        Age = 25,
+                        Name = "David"
+                    };
 
-                var person1 = hub.Invoke<SignalR.Samples.Hubs.DemoHub.DemoHub.Person>("ComplexType", person).Result;
-                var person2 = hub.GetValue<SignalR.Samples.Hubs.DemoHub.DemoHub.Person>("person");
-                JObject obj = ((dynamic)hub).person;
-                var person3 = obj.ToObject<SignalR.Samples.Hubs.DemoHub.DemoHub.Person>();
+                    var person1 = hub.InvokeWithTimeout<SignalR.Samples.Hubs.DemoHub.DemoHub.Person>("ComplexType", person);
+                    var person2 = hub.GetValue<SignalR.Samples.Hubs.DemoHub.DemoHub.Person>("person");
 
-                Assert.NotNull(person1);
-                Assert.NotNull(person2);
-                Assert.NotNull(person3);
-                Assert.Equal("David", person1.Name);
-                Assert.Equal("David", person2.Name);
-                Assert.Equal("David", person3.Name);
-                Assert.Equal(25, person1.Age);
-                Assert.Equal(25, person2.Age);
-                Assert.Equal(25, person3.Age);
-                Assert.Equal("Redmond", person1.Address.Street);
-                Assert.Equal("Redmond", person2.Address.Street);
-                Assert.Equal("Redmond", person3.Address.Street);
-                Assert.Equal("98052", person1.Address.Zip);
-                Assert.Equal("98052", person2.Address.Zip);
-                Assert.Equal("98052", person3.Address.Zip);
-
-                connection.Stop();
+                    Assert.NotNull(person1);
+                    Assert.NotNull(person2);
+                    Assert.Equal("David", person1.Name);
+                    Assert.Equal("David", person2.Name);
+                    Assert.Equal(25, person1.Age);
+                    Assert.Equal(25, person2.Age);
+                    Assert.Equal("Redmond", person1.Address.Street);
+                    Assert.Equal("Redmond", person2.Address.Street);
+                    Assert.Equal("98052", person1.Address.Zip);
+                    Assert.Equal("98052", person2.Address.Zip);
+                }
             }
         }
 
-        [Fact]
-        public void DynamicInvokeTest()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void DynamicInvokeTest(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://site/");
-                string callback = @"!!!|\CallMeBack,,,!!!";
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
 
-                var hub = connection.CreateHubProxy("demo");
+                using (connection)
+                {
+                    string callback = @"!!!|\CallMeBack,,,!!!";
 
-                var wh = new ManualResetEvent(false);
+                    var hub = connection.CreateHubProxy("demo");
 
-                hub.On(callback, () => wh.Set());
+                    var wh = new ManualResetEventSlim(false);
 
-                connection.Start(host).Wait();
+                    hub.On(callback, () => wh.Set());
 
-                hub.Invoke("DynamicInvoke", callback).Wait();
+                    connection.Start(host.Transport).Wait();
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(5)));
-                connection.Stop();
+                    hub.InvokeWithTimeout("DynamicInvoke", callback);
+
+                    Assert.True(wh.Wait(TimeSpan.FromSeconds(10)));
+                }
             }
         }
 
-        [Fact]
-        public void CreateProxyAfterConnectionStartsThrows()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void CreateProxyAfterConnectionStartsThrows(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://site/");
+                host.Initialize(messageBusType: messageBusType);
+                HubConnection connection = CreateHubConnection(host);
 
                 try
                 {
-                    connection.Start(host).Wait();
+                    connection.Start(host.Transport).Wait();
                     Assert.Throws<InvalidOperationException>(() => connection.CreateHubProxy("demo"));
                 }
                 finally
@@ -336,146 +1162,115 @@ namespace Microsoft.AspNet.SignalR.Tests
             }
         }
 
-        [Fact]
-        public void AddingToMultipleGroups()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void AddingToMultipleGroups(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
+                host.Initialize(messageBusType: messageBusType);
                 int max = 10;
 
                 var countDown = new CountDownRange<int>(Enumerable.Range(0, max));
-                var connection = new Client.Hubs.HubConnection("http://foo");
-                var proxy = connection.CreateHubProxy("MultGroupHub");
+                HubConnection connection = CreateHubConnection(host);
 
-                proxy.On<User>("onRoomJoin", user =>
+                using (connection)
                 {
-                    Assert.True(countDown.Mark(user.Index));
-                });
+                    var proxy = connection.CreateHubProxy("MultGroupHub");
 
-                connection.Start(host).Wait();
+                    proxy.On<User>("onRoomJoin", user =>
+                    {
+                        Assert.True(countDown.Mark(user.Index));
+                    });
 
-                for (int i = 0; i < max; i++)
-                {
-                    var user = new User { Index = i, Name = "tester", Room = "test" + i };
-                    proxy.Invoke("login", user).Wait();
-                    proxy.Invoke("joinRoom", user).Wait();
+                    connection.Start(host.Transport).Wait();
+
+                    for (int i = 0; i < max; i++)
+                    {
+                        var user = new User { Index = i, Name = "tester", Room = "test" + i };
+                        proxy.InvokeWithTimeout("login", user);
+                        proxy.InvokeWithTimeout("joinRoom", user);
+                    }
+
+                    Assert.True(countDown.Wait(TimeSpan.FromSeconds(30)), "Didn't receive " + max + " messages. Got " + (max - countDown.Count) + " missed " + String.Join(",", countDown.Left.Select(i => i.ToString())));
                 }
-
-                Assert.True(countDown.Wait(TimeSpan.FromSeconds(30)), "Didn't receive " + max + " messages. Got " + (max - countDown.Count) + " missed " + String.Join(",", countDown.Left.Select(i => i.ToString())));
-
-                connection.Stop();
             }
         }
 
-        [Fact]
-        public void HubGroupsDontRejoinByDefault()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void HubGroupsRejoinWhenAutoRejoiningGroupsEnabled(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.Configuration.KeepAlive = null;
-                host.Configuration.ConnectionTimeout = TimeSpan.FromSeconds(1);
-                host.Configuration.HeartBeatInterval = TimeSpan.FromSeconds(1);
-                host.MapHubs();
+                host.Initialize(keepAlive: null,
+                                disconnectTimeout: 6,
+                                connectionTimeout: 2,
+                                enableAutoRejoiningGroups: true,
+                                messageBusType: messageBusType);
+
                 int max = 10;
 
                 var countDown = new CountDownRange<int>(Enumerable.Range(0, max));
                 var countDownAfterReconnect = new CountDownRange<int>(Enumerable.Range(max, max));
-                var connection = new Client.Hubs.HubConnection("http://foo");
-                var proxy = connection.CreateHubProxy("MultGroupHub");
+                HubConnection connection = CreateHubConnection(host);
 
-                proxy.On<User>("onRoomJoin", u =>
+                using (connection)
                 {
-                    if (u.Index < max)
+                    var proxy = connection.CreateHubProxy("MultGroupHub");
+
+                    proxy.On<User>("onRoomJoin", u =>
                     {
-                        Assert.True(countDown.Mark(u.Index));
-                    }
-                    else
+                        if (u.Index < max)
+                        {
+                            Assert.True(countDown.Mark(u.Index));
+                        }
+                        else
+                        {
+                            Assert.True(countDownAfterReconnect.Mark(u.Index));
+                        }
+                    });
+
+                    connection.Start(host.Transport).Wait();
+
+                    var user = new User { Name = "tester" };
+                    proxy.InvokeWithTimeout("login", user);
+
+                    for (int i = 0; i < max; i++)
                     {
-                        Assert.True(countDownAfterReconnect.Mark(u.Index));
+                        user.Index = i;
+                        proxy.InvokeWithTimeout("joinRoom", user);
                     }
-                });
 
-                connection.Start(host).Wait();
+                    // Force Reconnect
+                    Thread.Sleep(TimeSpan.FromSeconds(3));
 
-                var user = new User { Name = "tester" };
-                proxy.Invoke("login", user).Wait();
-
-                for (int i = 0; i < max; i++)
-                {
-                    user.Index = i;
-                    proxy.Invoke("joinRoom", user).Wait();
-                }
-
-                // Force Reconnect
-                Thread.Sleep(TimeSpan.FromSeconds(3));
-
-                for (int i = max; i < 2 * max; i++)
-                {
-                    user.Index = i;
-                    proxy.Invoke("joinRoom", user).Wait();
-                }
-
-                Assert.True(countDown.Wait(TimeSpan.FromSeconds(30)), "Didn't receive " + max + " messages. Got " + (max - countDown.Count) + " missed " + String.Join(",", countDown.Left.Select(i => i.ToString())));
-                Assert.True(!countDownAfterReconnect.Wait(TimeSpan.FromSeconds(30)) && countDownAfterReconnect.Count == max);
-
-                connection.Stop();
-            }
-        }
-
-        [Fact]
-        public void HubGroupsRejoinWhenAutoRejoiningGroupsEnabled()
-        {
-            using (var host = new MemoryHost())
-            {
-                host.HubPipeline.EnableAutoRejoiningGroups();
-                host.Configuration.KeepAlive = null;
-                host.Configuration.ConnectionTimeout = TimeSpan.FromSeconds(1);
-                host.Configuration.HeartBeatInterval = TimeSpan.FromSeconds(1);
-                host.MapHubs();
-                int max = 10;
-
-                var countDown = new CountDownRange<int>(Enumerable.Range(0, max));
-                var countDownAfterReconnect = new CountDownRange<int>(Enumerable.Range(max, max));
-                var connection = new Client.Hubs.HubConnection("http://foo");
-                var proxy = connection.CreateHubProxy("MultGroupHub");
-
-                proxy.On<User>("onRoomJoin", u =>
-                {
-                    if (u.Index < max)
+                    for (int i = max; i < 2 * max; i++)
                     {
-                        Assert.True(countDown.Mark(u.Index));
+                        user.Index = i;
+                        proxy.InvokeWithTimeout("joinRoom", user);
                     }
-                    else
-                    {
-                        Assert.True(countDownAfterReconnect.Mark(u.Index));
-                    }
-                });
 
-                connection.Start(host).Wait();
-
-                var user = new User { Name = "tester" };
-                proxy.Invoke("login", user).Wait();
-
-                for (int i = 0; i < max; i++)
-                {
-                    user.Index = i;
-                    proxy.Invoke("joinRoom", user).Wait();
+                    Assert.True(countDown.Wait(TimeSpan.FromSeconds(30)), "Didn't receive " + max + " messages. Got " + (max - countDown.Count) + " missed " + String.Join(",", countDown.Left.Select(i => i.ToString())));
+                    Assert.True(countDownAfterReconnect.Wait(TimeSpan.FromSeconds(30)), "Didn't receive " + max + " messages. Got " + (max - countDownAfterReconnect.Count) + " missed " + String.Join(",", countDownAfterReconnect.Left.Select(i => i.ToString())));
                 }
-
-                // Force Reconnect
-                Thread.Sleep(TimeSpan.FromSeconds(3));
-
-                for (int i = max; i < 2 * max; i++)
-                {
-                    user.Index = i;
-                    proxy.Invoke("joinRoom", user).Wait();
-                }
-
-                Assert.True(countDown.Wait(TimeSpan.FromSeconds(30)), "Didn't receive " + max + " messages. Got " + (max - countDown.Count) + " missed " + String.Join(",", countDown.Left.Select(i => i.ToString())));
-                Assert.True(countDownAfterReconnect.Wait(TimeSpan.FromSeconds(30)), "Didn't receive " + max + " messages. Got " + (max - countDownAfterReconnect.Count) + " missed " + String.Join(",", countDownAfterReconnect.Left.Select(i => i.ToString())));
-
-                connection.Stop();
             }
         }
 
@@ -485,83 +1280,117 @@ namespace Microsoft.AspNet.SignalR.Tests
             var logRejoiningGroups = new LogRejoiningGroupsModule();
             using (var host = new MemoryHost())
             {
-                host.HubPipeline.AddModule(logRejoiningGroups);
+                host.Configure(app =>
+                {
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
 
-                host.Configuration.KeepAlive = null;
-                host.Configuration.ConnectionTimeout = TimeSpan.FromSeconds(1);
-                host.Configuration.HeartBeatInterval = TimeSpan.FromSeconds(1);
-                host.MapHubs();
+                    app.MapSignalR("/signalr", config);
 
-                var connection = new Client.Hubs.HubConnection("http://foo");
-                var proxy = connection.CreateHubProxy("MultGroupHub");
-                var proxy2 = connection.CreateHubProxy("MultGroupHub2");
+                    config.Resolver.Resolve<IHubPipeline>().AddModule(logRejoiningGroups);
+                    var configuration = config.Resolver.Resolve<IConfigurationManager>();
+                    // The following sets the heartbeat to 1 s
+                    configuration.DisconnectTimeout = TimeSpan.FromSeconds(6);
+                    configuration.KeepAlive = null;
+                    configuration.ConnectionTimeout = TimeSpan.FromSeconds(2);
+                });
 
-                connection.Start(host).Wait();
+                var connection = new HubConnection("http://foo");
 
-                var user = new User { Name = "tester" };
-                proxy.Invoke("login", user).Wait();
-                proxy2.Invoke("login", user).Wait();
+                using (connection)
+                {
+                    var proxy = connection.CreateHubProxy("MultGroupHub");
+                    var proxy2 = connection.CreateHubProxy("MultGroupHub2");
 
-                // Force Reconnect
-                Thread.Sleep(TimeSpan.FromSeconds(3));
+                    connection.Start(host).Wait();
 
-                proxy.Invoke("joinRoom", user).Wait();
-                proxy2.Invoke("joinRoom", user).Wait();
+                    var user = new User { Name = "tester" };
+                    proxy.InvokeWithTimeout("login", user);
+                    proxy2.InvokeWithTimeout("login", user);
 
-                Thread.Sleep(TimeSpan.FromSeconds(3));
+                    // Force Reconnect
+                    Thread.Sleep(TimeSpan.FromSeconds(3));
 
-                Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("foo"));
-                Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("tester"));
-                Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("foo2"));
-                Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("tester2"));
-                Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("foo2"));
-                Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("tester2"));
-                Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("foo"));
-                Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("tester"));
+                    proxy.InvokeWithTimeout("joinRoom", user);
+                    proxy2.InvokeWithTimeout("joinRoom", user);
 
-                connection.Stop();
+                    Thread.Sleep(TimeSpan.FromSeconds(3));
+
+                    Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("foo"));
+                    Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("tester"));
+                    Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("foo2"));
+                    Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub"].Contains("tester2"));
+                    Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("foo2"));
+                    Assert.True(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("tester2"));
+                    Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("foo"));
+                    Assert.False(logRejoiningGroups.GroupsRejoined["MultGroupHub2"].Contains("tester"));
+                }
             }
         }
 
-        [Fact]
-        public void CustomQueryStringRaw()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void CustomQueryStringRaw(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/", "a=b");
+                host.Initialize(messageBusType: messageBusType);
 
-                var hub = connection.CreateHubProxy("CustomQueryHub");
+                var connection = new HubConnection(host.Url, "a=b&test=" + GetTestName());
 
-                connection.Start(host).Wait();
+                using (connection)
+                {
+                    connection.TraceWriter = host.ClientTraceOutput;
 
-                var result = hub.Invoke<string>("GetQueryString", "a").Result;
+                    var hub = connection.CreateHubProxy("CustomQueryHub");
 
-                Assert.Equal("b", result);
+                    connection.Start(host.Transport).Wait();
 
-                connection.Stop();
+                    var result = hub.InvokeWithTimeout<string>("GetQueryString", "a");
+
+                    Assert.Equal("b", result);
+                }
             }
         }
 
-        [Fact]
-        public void CustomQueryString()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void CustomQueryString(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
+                host.Initialize(messageBusType: messageBusType);
                 var qs = new Dictionary<string, string>();
                 qs["a"] = "b";
-                var connection = new Client.Hubs.HubConnection("http://foo/", qs);
+                qs["test"] = GetTestName();
+                var connection = new HubConnection(host.Url, qs);
 
-                var hub = connection.CreateHubProxy("CustomQueryHub");
+                using (connection)
+                {
+                    connection.TraceWriter = host.ClientTraceOutput;
 
-                connection.Start(host).Wait();
+                    var hub = connection.CreateHubProxy("CustomQueryHub");
 
-                var result = hub.Invoke<string>("GetQueryString", "a").Result;
+                    connection.Start(host.Transport).Wait();
 
-                Assert.Equal("b", result);
+                    var result = hub.InvokeWithTimeout<string>("GetQueryString", "a");
 
-                connection.Stop();
+                    Assert.Equal("b", result);
+                }
             }
         }
 
@@ -574,12 +1403,22 @@ namespace Microsoft.AspNet.SignalR.Tests
 
             using (var host = new MemoryHost())
             {
-                host.HubPipeline.EnableAutoRejoiningGroups();
-                host.Configuration.KeepAlive = null;
-                host.Configuration.HeartBeatInterval = TimeSpan.FromSeconds(1);
-                host.DependencyResolver.Register(typeof(SomeHub), () => mockHub.Object);
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo");
+                host.Configure(app =>
+                {
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    app.MapSignalR("/signalr", config);
+
+                    var configuration = config.Resolver.Resolve<IConfigurationManager>();
+                    // The below effectively sets the heartbeat interval to one second.
+                    configuration.KeepAlive = TimeSpan.FromSeconds(2);
+                    config.Resolver.Register(typeof(SomeHub), () => mockHub.Object);
+                });
+
+                var connection = new HubConnection("http://foo");
 
                 var hub = connection.CreateHubProxy("SomeHub");
                 connection.Start(host).Wait();
@@ -599,13 +1438,24 @@ namespace Microsoft.AspNet.SignalR.Tests
 
             using (var host = new MemoryHost())
             {
-                host.HubPipeline.EnableAutoRejoiningGroups();
-                host.Configuration.KeepAlive = null;
-                host.Configuration.ConnectionTimeout = TimeSpan.FromSeconds(1);
-                host.Configuration.HeartBeatInterval = TimeSpan.FromSeconds(1);
-                host.DependencyResolver.Register(typeof(SomeHub), () => mockHub.Object);
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo");
+                host.Configure(app =>
+                {
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    app.MapSignalR("/signalr", config);
+
+                    var configuration = config.Resolver.Resolve<IConfigurationManager>();
+                    // The following sets the heartbeat to 1 s
+                    configuration.DisconnectTimeout = TimeSpan.FromSeconds(6);
+                    configuration.KeepAlive = null;
+                    configuration.ConnectionTimeout = TimeSpan.FromSeconds(2);
+                    config.Resolver.Register(typeof(SomeHub), () => mockHub.Object);
+                });
+
+                var connection = new HubConnection("http://foo");
 
                 var hub = connection.CreateHubProxy("SomeHub");
                 connection.Start(host).Wait();
@@ -613,7 +1463,7 @@ namespace Microsoft.AspNet.SignalR.Tests
                 // Force Reconnect
                 Thread.Sleep(TimeSpan.FromSeconds(3));
 
-                hub.Invoke("AllFoo").Wait();
+                hub.InvokeWithTimeout("AllFoo");
 
                 Thread.Sleep(TimeSpan.FromSeconds(3));
 
@@ -634,158 +1484,424 @@ namespace Microsoft.AspNet.SignalR.Tests
         [Fact]
         public void CreatedHubsGetDisposed()
         {
-            var mockDemoHubs = new List<Mock<SignalR.Samples.Hubs.DemoHub.DemoHub>>();
+            var mockHubs = new List<Mock<IHub>>();
 
             using (var host = new MemoryHost())
             {
-                host.DependencyResolver.Register(typeof(SignalR.Samples.Hubs.DemoHub.DemoHub), () =>
+                host.Configure(app =>
                 {
-                    var mockDemoHub = new Mock<SignalR.Samples.Hubs.DemoHub.DemoHub>() { CallBase = true };
-                    mockDemoHubs.Add(mockDemoHub);
-                    return mockDemoHub.Object;
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    app.MapSignalR("/signalr", config);
+
+                    config.Resolver.Register(typeof(IHub), () =>
+                    {
+                        var mockHub = new Mock<IHub>() { CallBase = true };
+
+                        mockHubs.Add(mockHub);
+                        return mockHub.Object;
+                    });
                 });
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
 
-                var hub = connection.CreateHubProxy("demo");
+                var connection = new HubConnection("http://foo/");
 
-                connection.Start(host).Wait();
-
-                var result = hub.Invoke<string>("ReadStateValue").Result;
-
-                foreach (var mockDemoHub in mockDemoHubs)
+                using (connection)
                 {
-                    mockDemoHub.Verify(d => d.Dispose(), Times.Once());
+                    var hub = connection.CreateHubProxy("demo");
+
+                    connection.Start(host).Wait();
+
+                    var result = hub.InvokeWithTimeout<string>("ReadStateValue");
+
+                    foreach (var mockDemoHub in mockHubs)
+                    {
+                        mockDemoHub.Verify(d => d.Dispose(), Times.Once());
+                    }
                 }
-
-                connection.Stop();
             }
         }
 
-        [Fact]
-        public void SendToAllButCaller()
+        [Theory]
+        [InlineData(MessageBusType.Default)]
+        [InlineData(MessageBusType.Fake)]
+        [InlineData(MessageBusType.FakeMultiStream)]
+        public void JoiningGroupMultipleTimesGetsMessageOnce(MessageBusType messagebusType)
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection1 = new Client.Hubs.HubConnection("http://foo/");
-                var connection2 = new Client.Hubs.HubConnection("http://foo/");
+                host.Configure(app =>
+                {
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
 
-                var wh1 = new ManualResetEventSlim(initialState: false);
-                var wh2 = new ManualResetEventSlim(initialState: false);
+                    UseMessageBus(messagebusType, config.Resolver);
 
-                var hub1 = connection1.CreateHubProxy("SendToSome");
-                var hub2 = connection2.CreateHubProxy("SendToSome");
+                    app.MapSignalR(config);
+                });
 
-                connection1.Start(host).Wait();
-                connection2.Start(host).Wait();
+                var connection = new HubConnection("http://foo");
 
-                hub1.On("send", wh1.Set);
-                hub2.On("send", wh2.Set);
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("SendToSome");
+                    int invocations = 0;
 
-                hub1.Invoke("SendToAllButCaller").Wait();
+                    connection.Start(host).Wait();
 
-                Assert.False(wh1.WaitHandle.WaitOne(TimeSpan.FromSeconds(10)));
-                Assert.True(wh2.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+                    hub.On("send", () =>
+                    {
+                        invocations++;
+                    });
 
-                connection1.Stop();
-                connection2.Stop();
+                    // Join the group multiple times
+                    hub.InvokeWithTimeout("JoinGroup", "a");
+                    hub.InvokeWithTimeout("JoinGroup", "a");
+                    hub.InvokeWithTimeout("JoinGroup", "a");
+                    hub.InvokeWithTimeout("SendToGroup", "a");
+
+                    Thread.Sleep(TimeSpan.FromSeconds(3));
+
+                    Assert.Equal(1, invocations);
+                }
             }
         }
 
-        [Fact]
-        public void SendToAllButCallerInGroup()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SendToAllButCaller(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection1 = new Client.Hubs.HubConnection("http://foo/");
-                var connection2 = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize(messageBusType: messageBusType);
 
-                var wh1 = new ManualResetEventSlim(initialState: false);
-                var wh2 = new ManualResetEventSlim(initialState: false);
+                var connection1 = CreateHubConnection(host);
+                var connection2 = CreateHubConnection(host);
 
-                var hub1 = connection1.CreateHubProxy("SendToSome");
-                var hub2 = connection2.CreateHubProxy("SendToSome");
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
 
-                connection1.Start(host).Wait();
-                connection2.Start(host).Wait();
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
 
-                hub1.On("send", wh1.Set);
-                hub2.On("send", wh2.Set);
+                    connection1.Start(host.TransportFactory()).Wait();
+                    connection2.Start(host.TransportFactory()).Wait();
 
-                hub1.Invoke("JoinGroup", "group").Wait();
-                hub2.Invoke("JoinGroup", "group").Wait();
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
 
-                hub1.Invoke("AllInGroupButCaller", "group").Wait();
+                    hub1.InvokeWithTimeout("SendToAllButCaller");
 
-                Assert.False(wh1.WaitHandle.WaitOne(TimeSpan.FromSeconds(10)));
-                Assert.True(wh2.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
-
-                connection1.Stop();
-                connection2.Stop();
+                    Assert.False(wh1.Wait(TimeSpan.FromSeconds(5)));
+                    Assert.True(wh2.Wait(TimeSpan.FromSeconds(10)));
+                }
             }
         }
 
-        [Fact]
-        public void SendToAll()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SendToAllButCallerInGroup(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection1 = new Client.Hubs.HubConnection("http://foo/");
-                var connection2 = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize(messageBusType: messageBusType);
 
-                var wh1 = new ManualResetEventSlim(initialState: false);
-                var wh2 = new ManualResetEventSlim(initialState: false);
+                var connection1 = CreateHubConnection(host);
+                var connection2 = CreateHubConnection(host);
 
-                var hub1 = connection1.CreateHubProxy("SendToSome");
-                var hub2 = connection2.CreateHubProxy("SendToSome");
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
 
-                connection1.Start(host).Wait();
-                connection2.Start(host).Wait();
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
 
-                hub1.On("send", wh1.Set);
-                hub2.On("send", wh2.Set);
+                    connection1.Start(host.TransportFactory()).Wait();
+                    connection2.Start(host.TransportFactory()).Wait();
 
-                hub1.Invoke("SendToAll").Wait();
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
 
-                Assert.True(wh1.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
-                Assert.True(wh2.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+                    hub1.InvokeWithTimeout("JoinGroup", "group");
+                    hub2.InvokeWithTimeout("JoinGroup", "group");
 
-                connection1.Stop();
-                connection2.Stop();
+                    hub1.InvokeWithTimeout("AllInGroupButCaller", "group");
+
+                    Assert.False(wh1.Wait(TimeSpan.FromSeconds(10)));
+                    Assert.True(wh2.Wait(TimeSpan.FromSeconds(5)));
+                }
             }
         }
 
-        [Fact]
-        public void SendToSelf()
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SendToAll(HostType hostType, TransportType transportType, MessageBusType messageBusType)
         {
-            using (var host = new MemoryHost())
+            using (var host = CreateHost(hostType, transportType))
             {
-                host.MapHubs();
-                var connection1 = new Client.Hubs.HubConnection("http://foo/");
-                var connection2 = new Client.Hubs.HubConnection("http://foo/");
+                host.Initialize(messageBusType: messageBusType);
 
-                var wh1 = new ManualResetEventSlim(initialState: false);
-                var wh2 = new ManualResetEventSlim(initialState: false);
+                var connection1 = CreateHubConnection(host);
+                var connection2 = CreateHubConnection(host);
 
-                var hub1 = connection1.CreateHubProxy("SendToSome");
-                var hub2 = connection2.CreateHubProxy("SendToSome");
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
 
-                connection1.Start(host).Wait();
-                connection2.Start(host).Wait();
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
 
-                hub1.On("send", wh1.Set);
-                hub2.On("send", wh2.Set);
+                    connection1.Start(host.TransportFactory()).Wait();
+                    connection2.Start(host.TransportFactory()).Wait();
 
-                hub1.Invoke("SendToSelf").Wait();
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
 
-                Assert.True(wh1.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
-                Assert.False(wh2.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+                    hub1.InvokeWithTimeout("SendToAll");
 
-                connection1.Stop();
-                connection2.Stop();
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(10)));
+                    Assert.True(wh2.Wait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SendToSelf(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                var connection1 = CreateHubConnection(host);
+                var connection2 = CreateHubConnection(host);
+
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
+
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
+
+                    connection1.Start(host.TransportFactory()).Wait();
+                    connection2.Start(host.TransportFactory()).Wait();
+
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
+
+                    hub1.InvokeWithTimeout("SendToSelf");
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(10)));
+                    Assert.False(wh2.Wait(TimeSpan.FromSeconds(5)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SendToSpecificConnections(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                var connection1 = CreateHubConnection(host);
+                var connection2 = CreateHubConnection(host);
+
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
+
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
+
+                    connection1.Start(host.TransportFactory()).Wait();
+                    connection2.Start(host.TransportFactory()).Wait();
+
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
+
+                    hub1.InvokeWithTimeout("SendToConnections", new List<string> { connection1.ConnectionId, connection2.ConnectionId });
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(5)));
+                    Assert.True(wh2.Wait(TimeSpan.FromSeconds(5)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        public void SendToEmptyConnectionsList(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                var connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("SendToSome");
+
+                    connection.Start(host.TransportFactory()).Wait();
+
+                    hub.InvokeWithTimeout("SendToConnections", new List<string> { });
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        public void SendToEmptyGroupsList(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                var connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("SendToSome");
+
+                    connection.Start(host.TransportFactory()).Wait();
+
+                    hub.InvokeWithTimeout("SendToGroups", new List<string> { });
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SendToSpecificGroups(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                var connection1 = CreateHubConnection(host);
+                var connection2 = CreateHubConnection(host);
+
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
+
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
+
+                    connection1.Start(host.TransportFactory()).Wait();
+                    connection2.Start(host.TransportFactory()).Wait();
+
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
+
+                    hub1.InvokeWithTimeout("JoinGroup", "group1");
+                    hub2.InvokeWithTimeout("JoinGroup", "group2");
+
+                    hub1.InvokeWithTimeout("SendToGroups", new List<string> { "group1", "group2" });
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(5)));
+                    Assert.True(wh2.Wait(TimeSpan.FromSeconds(5)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void SendToAllButCallerInGroups(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(messageBusType: messageBusType);
+
+                var connection1 = CreateHubConnection(host);
+                var connection2 = CreateHubConnection(host);
+
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
+
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
+
+                    connection1.Start(host.TransportFactory()).Wait();
+                    connection2.Start(host.TransportFactory()).Wait();
+
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
+
+                    hub1.InvokeWithTimeout("JoinGroup", "group1");
+                    hub2.InvokeWithTimeout("JoinGroup", "group2");
+
+                    hub1.InvokeWithTimeout("AllInGroupsButCaller", new List<string> { "group1", "group2" });
+
+                    Assert.False(wh1.Wait(TimeSpan.FromSeconds(10)));
+                    Assert.True(wh2.Wait(TimeSpan.FromSeconds(5)));
+                }
             }
         }
 
@@ -794,24 +1910,120 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection1 = new Client.Hubs.HubConnection("http://foo/");
-                var hubContext = host.ConnectionManager.GetHubContext("SendToSome");
+                IHubContext hubContext = null;
+                host.Configure(app =>
+                {
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
 
-                var wh1 = new ManualResetEventSlim(initialState: false);
+                    app.MapSignalR(configuration);
+                    hubContext = configuration.Resolver.Resolve<IConnectionManager>().GetHubContext("SendToSome");
+                });
 
-                var hub1 = connection1.CreateHubProxy("SendToSome");
+                var connection1 = new HubConnection("http://foo/");
 
-                connection1.Start(host).Wait();
+                using (connection1)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
 
-                hub1.On("send", wh1.Set);
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
 
-                hubContext.Groups.Add(connection1.ConnectionId, "Foo").Wait();
-                hubContext.Clients.Group("Foo").send();
+                    connection1.Start(host).Wait();
 
-                Assert.True(wh1.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+                    hub1.On("send", wh1.Set);
 
-                connection1.Stop();
+                    hubContext.Groups.Add(connection1.ConnectionId, "Foo").Wait();
+                    hubContext.Clients.Group("Foo").send();
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        }
+
+        [Fact]
+        public async Task SendToUserFromOutsideOfHub()
+        {
+            using (var host = new MemoryHost())
+            {
+                IHubContext hubContext = null;
+                host.Configure(app =>
+                {
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    var provider = new Mock<IUserIdProvider>();
+                    provider.Setup(m => m.GetUserId(It.IsAny<IRequest>()))
+                            .Returns<IRequest>(request =>
+                            {
+                                return request.QueryString["name"];
+                            });
+
+                    configuration.Resolver.Register(typeof(IUserIdProvider), () => provider.Object);
+
+                    app.MapSignalR(configuration);
+                    hubContext = configuration.Resolver.Resolve<IConnectionManager>().GetHubContext("SendToSome");
+                });
+
+                var qs = new Dictionary<string, string>
+                {
+                    { "name", "myuser" }
+                };
+
+                var wh = new ManualResetEventSlim();
+
+                using (var connection = new HubConnection("http://memoryhost", qs))
+                {
+                    var hub = connection.CreateHubProxy("SendToSome");
+
+                    await connection.Start(host);
+
+                    hub.On("send", wh.Set);
+
+                    await hubContext.Clients.User("myuser").send();
+
+                    Assert.True(wh.Wait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        }
+
+        [Fact]
+        public void SendToGroupsFromOutsideOfHub()
+        {
+            using (var host = new MemoryHost())
+            {
+                IHubContext hubContext = null;
+                host.Configure(app =>
+                {
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    app.MapSignalR(configuration);
+                    hubContext = configuration.Resolver.Resolve<IConnectionManager>().GetHubContext("SendToSome");
+                });
+
+                var connection1 = new HubConnection("http://foo/");
+
+                using (connection1)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+
+                    connection1.Start(host).Wait();
+
+                    hub1.On("send", wh1.Set);
+
+                    hubContext.Groups.Add(connection1.ConnectionId, "Foo").Wait();
+                    hubContext.Clients.Groups(new[] { "Foo" }).send();
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(10)));
+                }
             }
         }
 
@@ -820,23 +2032,70 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection1 = new Client.Hubs.HubConnection("http://foo/");
-                var hubContext = host.ConnectionManager.GetHubContext("SendToSome");
+                IHubContext hubContext = null;
+                host.Configure(app =>
+                {
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
 
-                var wh1 = new ManualResetEventSlim(initialState: false);
+                    app.MapSignalR(configuration);
+                    hubContext = configuration.Resolver.Resolve<IConnectionManager>().GetHubContext("SendToSome");
+                });
 
-                var hub1 = connection1.CreateHubProxy("SendToSome");
+                var connection1 = new HubConnection("http://foo/");
 
-                connection1.Start(host).Wait();
+                using (connection1)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
 
-                hub1.On("send", wh1.Set);
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
 
-                hubContext.Clients.Client(connection1.ConnectionId).send();
+                    connection1.Start(host).Wait();
 
-                Assert.True(wh1.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+                    hub1.On("send", wh1.Set);
 
-                connection1.Stop();
+                    hubContext.Clients.Client(connection1.ConnectionId).send();
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        }
+
+        [Fact]
+        public void SendToSpecificClientsFromOutsideOfHub()
+        {
+            using (var host = new MemoryHost())
+            {
+                IHubContext hubContext = null;
+                host.Configure(app =>
+                {
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    app.MapSignalR(configuration);
+                    hubContext = configuration.Resolver.Resolve<IConnectionManager>().GetHubContext("SendToSome");
+                });
+
+                var connection1 = new HubConnection("http://foo/");
+
+                using (connection1)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+
+                    connection1.Start(host).Wait();
+
+                    hub1.On("send", wh1.Set);
+
+                    hubContext.Clients.Clients(new[] { connection1.ConnectionId }).send();
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(10)));
+                }
             }
         }
 
@@ -845,35 +2104,179 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection1 = new Client.Hubs.HubConnection("http://foo/");
-                var connection2 = new Client.Hubs.HubConnection("http://foo/");
-                var hubContext = host.ConnectionManager.GetHubContext("SendToSome");
+                IHubContext hubContext = null;
+                host.Configure(app =>
+                {
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
 
-                var wh1 = new ManualResetEventSlim(initialState: false);
-                var wh2 = new ManualResetEventSlim(initialState: false);
+                    app.MapSignalR(configuration);
+                    hubContext = configuration.Resolver.Resolve<IConnectionManager>().GetHubContext("SendToSome");
+                });
 
-                var hub1 = connection1.CreateHubProxy("SendToSome");
-                var hub2 = connection2.CreateHubProxy("SendToSome");
+                var connection1 = new HubConnection("http://foo/");
+                var connection2 = new HubConnection("http://foo/");
 
-                connection1.Start(host).Wait();
-                connection2.Start(host).Wait();
+                using (connection1)
+                using (connection2)
+                {
+                    var wh1 = new ManualResetEventSlim(initialState: false);
+                    var wh2 = new ManualResetEventSlim(initialState: false);
 
-                hub1.On("send", wh1.Set);
-                hub2.On("send", wh2.Set);
+                    var hub1 = connection1.CreateHubProxy("SendToSome");
+                    var hub2 = connection2.CreateHubProxy("SendToSome");
 
-                hubContext.Clients.All.send();
+                    connection1.Start(host).Wait();
+                    connection2.Start(host).Wait();
 
-                Assert.True(wh1.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
-                Assert.True(wh2.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)));
+                    hub1.On("send", wh1.Set);
+                    hub2.On("send", wh2.Set);
 
-                connection1.Stop();
-                connection2.Stop();
+                    hubContext.Clients.All.send();
+
+                    Assert.True(wh1.Wait(TimeSpan.FromSeconds(10)));
+                    Assert.True(wh2.Wait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.Fake)]
+        [InlineData(HostType.Memory, TransportType.LongPolling, MessageBusType.FakeMultiStream)]
+        [InlineData(HostType.IISExpress, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.IISExpress, TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(HostType.HttpListener, TransportType.Websockets, MessageBusType.Default)]
+        public void JoinAndSendToGroupRenamedHub(HostType hostType, TransportType transportType, MessageBusType messageBusType)
+        {
+            using (var host = CreateHost(hostType, transportType))
+            {
+                host.Initialize(enableAutoRejoiningGroups: true, messageBusType: messageBusType);
+
+                HubConnection connection = CreateHubConnection(host);
+
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("groupChat");
+
+                    var list = new List<int>();
+
+                    hub.On<int>("send", list.Add);
+
+                    connection.Start(host.Transport).Wait();
+
+                    hub.InvokeWithTimeout("Join", "Foo");
+
+                    Thread.Sleep(100);
+
+                    hub.InvokeWithTimeout("Send", "Foo", "1");
+
+                    Thread.Sleep(100);
+
+                    hub.InvokeWithTimeout("Leave", "Foo");
+
+                    Thread.Sleep(100);
+
+                    for (int i = 0; i < 10; i++)
+                    {
+                        hub.InvokeWithTimeout("Send", "Foo", "2");
+                    }
+
+                    Assert.Equal(1, list.Count);
+                    Assert.Equal(1, list[0]);
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(TransportType.LongPolling)]
+        [InlineData(TransportType.ServerSentEvents)]
+        public async Task CanSuppressExceptionsInHubPipelineModuleOnIncomingError(TransportType transportType)
+        {
+            var supressErrorModule = new SuppressErrorModule();
+            using (var host = new MemoryHost())
+            {
+                host.Configure(app =>
+                {
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    app.MapSignalR(config);
+                    config.Resolver.Resolve<IHubPipeline>().AddModule(supressErrorModule);
+                });
+
+                using (var connection = CreateHubConnection("http://foo/"))
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    await connection.Start(CreateTransport(transportType, host));
+
+                    Assert.Equal(42, await hub.Invoke<int>("TaskWithException"));
+                }
+            }
+        }
+
+        [Theory]
+        [InlineData(TransportType.LongPolling, MessageBusType.Default)]
+        [InlineData(TransportType.LongPolling, MessageBusType.Fake)]
+        [InlineData(TransportType.LongPolling, MessageBusType.FakeMultiStream)]
+        [InlineData(TransportType.ServerSentEvents, MessageBusType.Default)]
+        [InlineData(TransportType.ServerSentEvents, MessageBusType.Fake)]
+        [InlineData(TransportType.ServerSentEvents, MessageBusType.FakeMultiStream)]
+        [InlineData(TransportType.Websockets, MessageBusType.Default)]
+        [InlineData(TransportType.Websockets, MessageBusType.Fake)]
+        [InlineData(TransportType.Websockets, MessageBusType.FakeMultiStream)]
+        public async Task CanChangeExceptionsInHubPipelineModuleOnIncomingError(TransportType transportType, MessageBusType messageBusType)
+        {
+            var supressErrorModule = new WrapErrorModule();
+            using (var host = new MemoryHost())
+            {
+                host.Configure(app =>
+                {
+                    var config = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+                    app.MapSignalR(config);
+                    config.Resolver.Resolve<IHubPipeline>().AddModule(supressErrorModule);
+                });
+
+                using (var connection = CreateHubConnection("http://foo/"))
+                {
+                    var hub = connection.CreateHubProxy("demo");
+
+                    await connection.Start(host);
+
+                    try
+                    {
+                        await hub.Invoke("TaskWithException");
+                    }
+                    catch (Client.HubException ex)
+                    {
+                        Assert.Equal("Wrapped", ex.Message);
+                        Assert.Equal("Data", (string)((dynamic)ex.ErrorData).Error);
+                        return;
+                    }
+
+                    Assert.True(false, "hub.Invoke didn't throw.");
+                }
             }
         }
 
         public class SendToSome : Hub
         {
+            public Task SendToUser(string userId)
+            {
+                return Clients.User(userId).send();
+            }
+
             public Task SendToAllButCaller()
             {
                 return Clients.Others.send();
@@ -889,6 +2292,11 @@ namespace Microsoft.AspNet.SignalR.Tests
                 return Groups.Add(Context.ConnectionId, group);
             }
 
+            public Task SendToGroup(string group)
+            {
+                return Clients.Group(group).send();
+            }
+
             public Task AllInGroupButCaller(string group)
             {
                 return Clients.OthersInGroup(group).send();
@@ -897,6 +2305,21 @@ namespace Microsoft.AspNet.SignalR.Tests
             public Task SendToSelf()
             {
                 return Clients.Client(Context.ConnectionId).send();
+            }
+
+            public Task SendToConnections(IList<string> connectionIds)
+            {
+                return Clients.Clients(connectionIds).send();
+            }
+
+            public Task SendToGroups(IList<string> groups)
+            {
+                return Clients.Groups(groups).send();
+            }
+
+            public Task AllInGroupsButCaller(IList<string> groups)
+            {
+                return Clients.OthersInGroups(groups).send();
             }
         }
 
@@ -964,9 +2387,9 @@ namespace Microsoft.AspNet.SignalR.Tests
 
         public class LogRejoiningGroupsModule : HubPipelineModule
         {
-            public Dictionary<string, List<string>> GroupsRejoined = new Dictionary<string,List<string>>();
+            public Dictionary<string, List<string>> GroupsRejoined = new Dictionary<string, List<string>>();
 
-            public override Func<HubDescriptor, IRequest, IEnumerable<string>, IEnumerable<string>> BuildRejoiningGroups(Func<HubDescriptor, IRequest, IEnumerable<string>, IEnumerable<string>> rejoiningGroups)
+            public override Func<HubDescriptor, IRequest, IList<string>, IList<string>> BuildRejoiningGroups(Func<HubDescriptor, IRequest, IList<string>, IList<string>> rejoiningGroups)
             {
                 return (hubDescriptor, request, groups) =>
                 {
@@ -983,17 +2406,27 @@ namespace Microsoft.AspNet.SignalR.Tests
             }
         }
 
+        public class SuppressErrorModule : HubPipelineModule
+        {
+            protected override void OnIncomingError(ExceptionContext exceptionContext, IHubIncomingInvokerContext invokerContext)
+            {
+                exceptionContext.Result = 42;
+            }
+        }
+
+        public class WrapErrorModule : HubPipelineModule
+        {
+            protected override void OnIncomingError(ExceptionContext exceptionContext, IHubIncomingInvokerContext invokerContext)
+            {
+                exceptionContext.Error = new HubException("Wrapped", new { Error = "Data" });
+            }
+        }
+
         public class User
         {
             public int Index { get; set; }
             public string Name { get; set; }
             public string Room { get; set; }
-        }
-
-        public void Dispose()
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
         }
     }
 }

@@ -1,37 +1,55 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Security.Principal;
 using System.Threading;
-using Microsoft.AspNet.SignalR.Client.Hubs;
+using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Client;
 using Microsoft.AspNet.SignalR.Hosting.Memory;
 using Microsoft.AspNet.SignalR.Hubs;
+using Microsoft.AspNet.SignalR.Tests.Common;
+using Microsoft.AspNet.SignalR.Tests.Common.Infrastructure;
+using Owin;
 using Xunit;
 
 namespace Microsoft.AspNet.SignalR.Tests
 {
-    public class HubAuthFacts : IDisposable
+    using AppFunc = Func<IDictionary<string, object>, Task>;
+
+    public class HubAuthFacts : HostedTest
     {
         [Fact]
         public void UnauthenticatedUserCanReceiveHubMessagesByDefault()
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
+
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -40,23 +58,34 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
+
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -65,25 +94,36 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
+
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -92,25 +132,36 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
+
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -119,24 +170,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.HubPipeline.RequireAuthentication();
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    configuration.Resolver.Resolve<IHubPipeline>().RequireAuthentication();
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -145,24 +205,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.HubPipeline.RequireAuthentication();
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    configuration.Resolver.Resolve<IHubPipeline>().RequireAuthentication();
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -171,26 +242,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.HubPipeline.RequireAuthentication();
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    configuration.Resolver.Resolve<IHubPipeline>().RequireAuthentication();
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -199,26 +277,37 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.HubPipeline.RequireAuthentication();
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("NoAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    configuration.Resolver.Resolve<IHubPipeline>().RequireAuthentication();
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("NoAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -227,23 +316,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("AuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -252,23 +349,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("AuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -277,25 +384,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("AuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -304,25 +417,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("AuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -331,23 +454,30 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("InheritAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
+                var connection = CreateHubConnection("http://foo/");
 
-                connection.Start(host).Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("InheritAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -356,23 +486,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("InheritAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("InheritAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -381,25 +521,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { });
-
-                var hub = connection.CreateHubProxy("InheritAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("InheritAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -408,25 +554,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("InheritAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("InheritAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -435,23 +591,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { "Admin" });
-
-                var hub = connection.CreateHubProxy("AdminAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AdminAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -460,25 +624,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { "Admin" });
-
-                var hub = connection.CreateHubProxy("AdminAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AdminAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -487,23 +657,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("AdminAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "NotAdmin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AdminAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -512,25 +690,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("AdminAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "NotAdmin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AdminAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -539,23 +723,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "Admin" });
-
-                var hub = connection.CreateHubProxy("AdminAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AdminAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -564,25 +758,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { "Admin" });
-
-                var hub = connection.CreateHubProxy("AdminAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("AdminAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -591,23 +795,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("User"), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("User"), new string[] { "User", "NotAdmin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -616,25 +828,31 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "Admin" });
-
-                var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.Throws<AggregateException>(() => connection.Start(host).Wait());
+                }
             }
         }
 
@@ -643,23 +861,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("User"), new string[] { "test", "Admin" });
-
-                var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("User"), new string[] { "test", "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -668,25 +896,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("User"), new string[] { "Admin" });
-
-                var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("User"), new string[] { "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("UserAndRoleAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -695,23 +933,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("IncomingAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { "User", "NotAdmin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("IncomingAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -720,25 +968,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("IncomingAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { "User", "NotAdmin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("IncomingAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("InvokedFromClient"));
+
+                    Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -747,23 +1005,33 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("Admin"), new string[] { });
-
-                var hub = connection.CreateHubProxy("IncomingAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("Admin"), new string[] { }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("IncomingAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
+
+                    connection.Start(host).Wait();
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -772,122 +1040,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("User"), new string[] { "Admin" });
-
-                var hub = connection.CreateHubProxy("IncomingAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("User"), new string[] { "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
-
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
-            }
-        }
-
-        [Fact]
-        public void UnauthenticatedUserCannotReceiveHubMessagesFromOutgoingAuthorizedHubs()
-        {
-            using (var host = new MemoryHost())
-            {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("OutgoingAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                using (connection)
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
-                });
+                    var hub = connection.CreateHubProxy("IncomingAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                connection.Start(host).Wait();
+                    connection.Start(host).Wait();
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
-            }
-        }
+                    hub.InvokeWithTimeout("InvokedFromClient");
 
-        [Fact]
-        public void UnauthenticatedUserCanInvokeMethodsInOutgoingAuthorizedHubs()
-        {
-            using (var host = new MemoryHost())
-            {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("OutgoingAuthHub");
-
-                connection.Start(host).Wait();
-
-                hub.Invoke("InvokedFromClient").Wait();
-
-                connection.Stop();
-            }
-        }
-
-        [Fact]
-        public void AuthenticatedUserCanReceiveHubMessagesFromOutgoingAuthorizedHubs()
-        {
-            using (var host = new MemoryHost())
-            {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("Admin"), new string[] { });
-
-                var hub = connection.CreateHubProxy("OutgoingAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
-                {
-                    Assert.NotNull(id);
-                    wh.Set();
-                });
-
-                connection.Start(host).Wait();
-
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
-            }
-        }
-
-        [Fact]
-        public void AuthenticatedUserCanInvokeMethodsInOutgoingAuthorizedHubs()
-        {
-            using (var host = new MemoryHost())
-            {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("User"), new string[] { "Admin" });
-
-                var hub = connection.CreateHubProxy("OutgoingAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
-                {
-                    Assert.NotNull(id);
-                    wh.Set();
-                });
-
-                connection.Start(host).Wait();
-
-                hub.Invoke("InvokedFromClient").Wait();
-
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -896,25 +1077,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity(""), new string[] { "Admin", "Invoker" });
-
-                var hub = connection.CreateHubProxy("InvokeAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity(""), new string[] { "Admin", "Invoker" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("InvokeAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("InvokedFromClient"));
+
+                    Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -923,25 +1114,35 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "NotAdmin" });
-
-                var hub = connection.CreateHubProxy("InvokeAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "NotAdmin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                Assert.Throws<AggregateException>(() => hub.Invoke("InvokedFromClient").Wait());
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("InvokeAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    Assert.Throws<AggregateException>(() => hub.InvokeWithTimeout("InvokedFromClient"));
+
+                    Assert.False(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
@@ -950,32 +1151,50 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             using (var host = new MemoryHost())
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
-
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "Admin" });
-
-                var hub = connection.CreateHubProxy("InvokeAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string>("invoked", (id, time) =>
+                host.Configure(app =>
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
+                    var configuration = new HubConfiguration
+                    {
+                        Resolver = new DefaultDependencyResolver()
+                    };
+
+                    WithUser(app, new GenericPrincipal(new GenericIdentity("test"), new string[] { "User", "Admin" }));
+                    app.MapSignalR("/signalr", configuration);
                 });
 
-                connection.Start(host).Wait();
+                var connection = CreateHubConnection("http://foo/");
 
-                hub.Invoke("InvokedFromClient").Wait();
+                using (connection)
+                {
+                    var hub = connection.CreateHubProxy("InvokeAuthHub");
+                    var wh = new ManualResetEvent(false);
+                    hub.On<string, string>("invoked", (id, time) =>
+                    {
+                        Assert.NotNull(id);
+                        wh.Set();
+                    });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                    connection.Start(host).Wait();
+
+                    hub.InvokeWithTimeout("InvokedFromClient");
+
+                    Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
+                }
             }
         }
 
-        public void Dispose()
+        private static void WithUser(IAppBuilder app, IPrincipal user)
         {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+            Func<AppFunc, AppFunc> middleware = (next) =>
+            {
+                return env =>
+                {
+                    env["server.User"] = user;
+                    return next(env);
+                };
+            };
+
+            app.Use(middleware);
         }
     }
 }

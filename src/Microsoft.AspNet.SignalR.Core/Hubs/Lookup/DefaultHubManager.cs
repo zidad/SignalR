@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.AspNet.SignalR.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Hubs
@@ -23,7 +24,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
         public HubDescriptor GetHub(string hubName)
         {
             HubDescriptor descriptor = null;
-            if(_hubProviders.FirstOrDefault(p => p.TryGetHub(hubName, out descriptor)) != null)
+            if (_hubProviders.FirstOrDefault(p => p.TryGetHub(hubName, out descriptor)) != null)
             {
                 return descriptor;
             }
@@ -31,11 +32,11 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return null;
         }
 
-        public IEnumerable<HubDescriptor> GetHubs(Func<HubDescriptor, bool> predicate = null)
+        public IEnumerable<HubDescriptor> GetHubs(Func<HubDescriptor, bool> predicate)
         {
             var hubs = _hubProviders.SelectMany(p => p.GetHubs());
 
-            if(predicate != null) 
+            if (predicate != null)
             {
                 return hubs.Where(predicate);
             }
@@ -43,7 +44,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return hubs;
         }
 
-        public MethodDescriptor GetHubMethod(string hubName, string method, params IJsonValue[] parameters)
+        public MethodDescriptor GetHubMethod(string hubName, string method, IList<IJsonValue> parameters)
         {
             HubDescriptor hub = GetHub(hubName);
 
@@ -61,7 +62,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return null;
         }
 
-        public IEnumerable<MethodDescriptor> GetHubMethods(string hubName, Func<MethodDescriptor, bool> predicate = null)
+        public IEnumerable<MethodDescriptor> GetHubMethods(string hubName, Func<MethodDescriptor, bool> predicate)
         {
             HubDescriptor hub = GetHub(hubName);
 
@@ -72,13 +73,13 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
             var methods = _methodProviders.SelectMany(p => p.GetMethods(hub));
 
-            if(predicate != null) 
+            if (predicate != null)
             {
                 return methods.Where(predicate);
             }
 
             return methods;
-                    
+
         }
 
         public IHub ResolveHub(string hubName)
@@ -89,7 +90,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
         public IEnumerable<IHub> ResolveHubs()
         {
-            return GetHubs().Select(hub => _activator.Create(hub));
+            return GetHubs(predicate: null).Select(hub => _activator.Create(hub));
         }
     }
 }

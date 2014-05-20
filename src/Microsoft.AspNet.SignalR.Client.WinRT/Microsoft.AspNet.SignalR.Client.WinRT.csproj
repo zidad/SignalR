@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -9,7 +9,7 @@
     <ProjectGuid>{0D2276D4-E912-46A4-8A06-59C4B8A537FC}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Microsoft.AspNet.SignalR.Client.WinRT</RootNamespace>
+    <RootNamespace>Microsoft.AspNet.SignalR.Client</RootNamespace>
     <AssemblyName>Microsoft.AspNet.SignalR.Client</AssemblyName>
     <DefaultLanguage>en-US</DefaultLanguage>
     <FileAlignment>512</FileAlignment>
@@ -95,6 +95,7 @@
     <ErrorReport>prompt</ErrorReport>
     <CodeAnalysisRuleSet>ExpressRules.ruleset</CodeAnalysisRuleSet>
     <Prefer32Bit>true</Prefer32Bit>
+    <DocumentationFile>bin\x86\Debug\Microsoft.AspNet.SignalR.Client.XML</DocumentationFile>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
     <OutputPath>bin\x86\Release\</OutputPath>
@@ -107,6 +108,7 @@
     <ErrorReport>prompt</ErrorReport>
     <CodeAnalysisRuleSet>ExpressRules.ruleset</CodeAnalysisRuleSet>
     <Prefer32Bit>true</Prefer32Bit>
+    <DocumentationFile>bin\x86\Release\Microsoft.AspNet.SignalR.Client.XML</DocumentationFile>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\Common\CommonAssemblyInfo.cs">
@@ -115,20 +117,23 @@
     <Compile Include="..\Common\CommonVersionInfo.cs">
       <Link>Properties\CommonVersionInfo.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Connection.cs">
-      <Link>Connection.cs</Link>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client45\Http\DefaultHttpClient.cs">
+      <Link>Http\DefaultHttpClient.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\ConnectionExtensions.cs">
-      <Link>ConnectionExtensions.cs</Link>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client45\Http\DefaultHttpHandler.cs">
+      <Link>Http\DefaultHttpHandler.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\ConnectionState.cs">
-      <Link>ConnectionState.cs</Link>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client45\Http\HttpRequestMessageWrapper.cs">
+      <Link>Http\HttpRequestMessageWrapper.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\ExceptionHelper.cs">
-      <Link>Infrastructure\ExceptionHelper.cs</Link>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client45\Http\HttpResponseMessageWrapper.cs">
+      <Link>Http\HttpResponseMessageWrapper.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\StateChange.cs">
-      <Link>StateChange.cs</Link>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client45\Infrastructure\HttpClientException.cs">
+      <Link>Infrastructure\HttpClientException.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\HeaderDictionary.cs">
+      <Link>HeaderDictionary.cs</Link>
     </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Http\IHttpClient.cs">
       <Link>Http\IHttpClient.cs</Link>
@@ -142,14 +147,83 @@
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Http\IResponse.cs">
       <Link>Http\IResponse.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\HubConnection.cs">
-      <Link>Hubs\HubConnection.cs</Link>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Http\IResponseExtensions.cs">
+      <Link>Http\IResponseExtensions.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\HubConnection.cs">
+      <Link>HubConnection.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\HubException.cs">
+      <Link>HubException.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\HubProxyExtensions.cs">
+      <Link>HubProxyExtensions.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\IHubProxy.cs">
+      <Link>IHubProxy.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\ErrorExtensions.cs">
+      <Link>Infrastructure\ErrorExtensions.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\SignalRError.cs">
+      <Link>Infrastructure\SignalRError.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\TransportAbortHandler.cs">
+      <Link>Infrastructure\TransportAbortHandler.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\TransportInitializationHandler.cs">
+      <Link>Infrastructure\TransportInitializationHandler.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Resources.Designer.cs">
+      <Link>Resources.Designer.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\HeartBeatMonitor.cs">
+      <Link>HeartBeatMonitor.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\KeepAliveData.cs">
+      <Link>KeepAliveData.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\TraceLevels.cs">
+      <Link>TraceLevels.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Transports\AsyncStreamReader.cs">
+      <Link>Transports\AsyncStreamReader.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Transports\LongPolling\NegotiateInitializer.cs">
+      <Link>Transports\LongPolling\NegotiateInitializer.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Transports\LongPolling\PollingRequestHandler.cs">
+      <Link>Transports\LongPolling\PollingRequestHandler.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Core\Infrastructure\CancellationTokenExtensions.cs">
+      <Link>Infrastructure\CancellationTokenExtensions.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Core\Infrastructure\DisposableAction.cs">
+      <Link>Infrastructure\DisposableAction.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Core\Infrastructure\Disposer.cs">
+      <Link>Infrastructure\Disposer.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Connection.cs">
+      <Link>Connection.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\ConnectionExtensions.cs">
+      <Link>ConnectionExtensions.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\ConnectionState.cs">
+      <Link>ConnectionState.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\IHubConnection.cs">
+      <Link>Hubs\IHubConnection.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\ExceptionHelper.cs">
+      <Link>Infrastructure\ExceptionHelper.cs</Link>
+    </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\StateChange.cs">
+      <Link>StateChange.cs</Link>
     </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\HubProxy.cs">
       <Link>Hubs\HubProxy.cs</Link>
-    </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\HubProxyExtensions.cs">
-      <Link>Hubs\HubProxyExtensions.cs</Link>
     </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\HubRegistrationData.cs">
       <Link>Hubs\HubRegistrationData.cs</Link>
@@ -163,17 +237,11 @@
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\HubInvocation.cs">
       <Link>Hubs\HubInvocation.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\IHubProxy.cs">
-      <Link>Hubs\IHubProxy.cs</Link>
-    </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Hubs\Subscription.cs">
       <Link>Hubs\Subscription.cs</Link>
     </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\IConnection.cs">
       <Link>IConnection.cs</Link>
-    </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\DisposableAction.cs">
-      <Link>Infrastructure\DisposableAction.cs</Link>
     </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Infrastructure\ThreadSafeInvoker.cs">
       <Link>Infrastructure\ThreadSafeInvoker.cs</Link>
@@ -214,30 +282,35 @@
     <Compile Include="..\Microsoft.AspNet.SignalR.Client\Transports\ServerSentEvents\SseEvent.cs">
       <Link>Transports\ServerSentEvents\SseEvent.cs</Link>
     </Compile>
-    <Compile Include="..\Microsoft.AspNet.SignalR.Hosting.Common\Infrastructure\UriQueryUtility.cs">
-      <Link>Infrastructure\UriQueryUtility.cs</Link>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Client\Transports\TransportHelper.cs">
+      <Link>Transports\TransportHelper.cs</Link>
     </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Core\Infrastructure\ExceptionsExtensions.cs">
       <Link>Infrastructure\ExceptionsExtensions.cs</Link>
     </Compile>
+    <Compile Include="..\Microsoft.AspNet.SignalR.Core\Infrastructure\TaskQueue.cs">
+      <Link>Infrastructure\TaskQueue.cs</Link>
+    </Compile>
     <Compile Include="..\Microsoft.AspNet.SignalR.Core\TaskAsyncHelper.cs">
       <Link>TaskAsyncHelper.cs</Link>
     </Compile>
-    <Compile Include="Http\DefaultHttpClient.cs" />
-    <Compile Include="Http\DefaultHttpHandler.cs" />
-    <Compile Include="Http\HttpResponseMessageWrapper.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\Microsoft.AspNet.SignalR.Client\Resources.resx">
+      <Link>Resources.resx</Link>
+    </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Newtonsoft.Json, Version=4.5.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
-      <HintPath>..\..\packages\Newtonsoft.Json.4.5.4\lib\winrt45\Newtonsoft.Json.dll</HintPath>
+      <HintPath>..\..\packages\Newtonsoft.Json.5.0.6\lib\netcore45\Newtonsoft.Json.dll</HintPath>
     </Reference>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
   </ItemGroup>
-  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '' ">
+  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '' Or '$(VisualStudioVersion)' == '10.0'">
     <VisualStudioVersion>11.0</VisualStudioVersion>
   </PropertyGroup>
   <PropertyGroup>
@@ -246,10 +319,11 @@
   <Import Project="..\Common\Microsoft.AspNet.SignalR.targets" />
   <Import Project="$(MSBuildExtensionsPath)\Microsoft\WindowsXaml\v$(VisualStudioVersion)\Microsoft.Windows.UI.Xaml.CSharp.targets" />
   <Import Project="$(SolutionDir)\.nuget\nuget.targets" />
-  <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
-       Other similar extension points exist, see Microsoft.Common.targets.
   <Target Name="BeforeBuild">
+    <Copy SourceFiles="..\Microsoft.AspNet.SignalR.Client\Resources.resx" DestinationFiles="$(ProjectDir)\Resources.resw" SkipUnchangedFiles="true" />
   </Target>
+  <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
+       Other similar extension points exist, see Microsoft.Common.targets.  
   <Target Name="AfterBuild">
   </Target>
   -->

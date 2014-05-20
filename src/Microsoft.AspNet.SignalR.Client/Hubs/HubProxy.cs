@@ -2,27 +2,23 @@
 
 using System;
 using System.Collections.Generic;
-#if !WINDOWS_PHONE && !NET35
-using System.Dynamic;
-#endif
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Client;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Client.Hubs
 {
-    public class HubProxy :
-#if !WINDOWS_PHONE && !NET35
- DynamicObject,
-#endif
- IHubProxy
+    public class HubProxy : IHubProxy
     {
         private readonly string _hubName;
-        private readonly IConnection _connection;
+        private readonly IHubConnection _connection;
         private readonly Dictionary<string, JToken> _state = new Dictionary<string, JToken>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, Subscription> _subscriptions = new Dictionary<string, Subscription>(StringComparer.OrdinalIgnoreCase);
 
-        public HubProxy(IConnection connection, string hubName)
+        public HubProxy(IHubConnection connection, string hubName)
         {
             _connection = connection;
             _hubName = hubName;
@@ -48,6 +44,11 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
             }
         }
 
+        public JsonSerializer JsonSerializer
+        {
+            get { return _connection.JsonSerializer; }
+        }
+
         public Subscription Subscribe(string eventName)
         {
             if (eventName == null)
@@ -70,6 +71,7 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
             return Invoke<object>(method, args);
         }
 
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flown to the caller")]
         public Task<T> Invoke<T>(string method, params object[] args)
         {
             if (method == null)
@@ -77,71 +79,108 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
                 throw new ArgumentNullException("method");
             }
 
+            if (args == null)
+            {
+                throw new ArgumentNullException("args");
+            }
+
             var tokenifiedArguments = new JToken[args.Length];
             for (int i = 0; i < tokenifiedArguments.Length; i++)
             {
-                tokenifiedArguments[i] = JToken.FromObject(args[i]);
+                tokenifiedArguments[i] = JToken.FromObject(args[i], JsonSerializer);
             }
+
+            var tcs = new TaskCompletionSource<T>();
+            var callbackId = _connection.RegisterCallback(result =>
+            {
+                if (result != null)
+                {
+                    if (result.Error != null)
+                    {
+                        if (result.IsHubException.HasValue && result.IsHubException.Value)
+                        {
+                            // A HubException was thrown
+                            tcs.TrySetException(new HubException(result.Error, result.ErrorData));
+                        }
+                        else
+                        {
+                            tcs.TrySetException(new InvalidOperationException(result.Error));
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            if (result.State != null)
+                            {
+                                foreach (var pair in result.State)
+                                {
+                                    this[pair.Key] = pair.Value;
+                                }
+                            }
+
+                            if (result.Result != null)
+                            {
+                                tcs.TrySetResult(result.Result.ToObject<T>(JsonSerializer));
+                            }
+                            else
+                            {
+                                tcs.TrySetResult(default(T));
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // If we failed to set the result for some reason or to update
+                            // state then just fail the tcs.
+                            tcs.TrySetUnwrappedException(ex);
+                        }
+                    }
+                }
+                else
+                {
+                    tcs.TrySetCanceled();
+                }
+            });
 
             var hubData = new HubInvocation
             {
                 Hub = _hubName,
                 Method = method,
                 Args = tokenifiedArguments,
-                State = _state
+                CallbackId = callbackId
             };
 
-            var value = JsonConvert.SerializeObject(hubData);
-
-            return _connection.Send<HubResult<T>>(value).Then(result =>
+            if (_state.Count != 0)
             {
-                if (result != null)
+                hubData.State = _state;
+            }
+
+            var value = _connection.JsonSerializeObject(hubData);
+
+            _connection.Send(value).ContinueWith(task =>
+            {
+                if (task.IsCanceled)
                 {
-                    if (result.Error != null)
-                    {
-                        throw new InvalidOperationException(result.Error);
-                    }
-
-                    if (result.State != null)
-                    {
-                        foreach (var pair in result.State)
-                        {
-                            this[pair.Key] = pair.Value;
-                        }
-                    }
-
-                    return result.Result;
+                    _connection.RemoveCallback(callbackId);
+                    tcs.TrySetCanceled();
                 }
-                return default(T);
-            });
+                else if (task.IsFaulted)
+                {
+                    _connection.RemoveCallback(callbackId);
+                    tcs.TrySetUnwrappedException(task.Exception);
+                }
+            },
+            TaskContinuationOptions.NotOnRanToCompletion);
+
+            return tcs.Task;
         }
 
-#if !WINDOWS_PHONE && !NET35
-        public override bool TrySetMember(SetMemberBinder binder, object value)
+        public void InvokeEvent(string eventName, IList<JToken> args)
         {
-            this[binder.Name] = value as JToken ?? JToken.FromObject(value);
-            return true;
-        }
-
-        public override bool TryGetMember(GetMemberBinder binder, out object result)
-        {
-            result = this[binder.Name];
-            return true;
-        }
-
-        public override bool TryInvokeMember(InvokeMemberBinder binder, object[] args, out object result)
-        {
-            result = Invoke(binder.Name, args);
-            return true;
-        }
-#endif
-
-        public void InvokeEvent(string eventName, JToken[] args)
-        {
-            Subscription eventObj;
-            if (_subscriptions.TryGetValue(eventName, out eventObj))
+            Subscription subscription;
+            if (_subscriptions.TryGetValue(eventName, out subscription))
             {
-                eventObj.OnData(args);
+                subscription.OnReceived(args);
             }
         }
     }

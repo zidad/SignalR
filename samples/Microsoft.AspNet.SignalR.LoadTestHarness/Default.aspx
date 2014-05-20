@@ -8,7 +8,7 @@
     <link href="Content/dashboard.css" rel="stylesheet" />
 </head>
 <body>
-    <h1>SignalR Load Test Harness</h1>
+    <h1>ASP.NET SignalR Load Test Harness</h1>
     
     <fieldset id="options"><legend>Dashboard</legend>
         <div>
@@ -69,7 +69,7 @@
     <script src="Scripts/jquery-ui-1.9.0.js"></script>
     <script src="Scripts/jquery.color-2.1.0.js"></script>
     <script src="Scripts/jquery.signalR.js"></script>
-    <script src="signalr/hubs"></script>
+    <script src="signalr/js"></script>
     <script src="Scripts/knockout-2.1.0.debug.js"></script>
     <script src="Scripts/dashboard.js"></script>
 </body>

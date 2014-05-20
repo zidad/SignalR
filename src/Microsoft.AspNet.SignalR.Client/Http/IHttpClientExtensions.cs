@@ -7,9 +7,24 @@ namespace Microsoft.AspNet.SignalR.Client.Http
 {
     public static class IHttpClientExtensions
     {
-        public static Task<IResponse> PostAsync(this IHttpClient client, string url, Action<IRequest> prepareRequest)
+        public static Task<IResponse> Post(this IHttpClient client, string url, Action<IRequest> prepareRequest, bool isLongRunning)
         {
-            return client.PostAsync(url, prepareRequest, postData: null);
+            if (client == null)
+            {
+                throw new ArgumentNullException("client");
+            }
+
+            if (url == null)
+            {
+                throw new ArgumentNullException("url");
+            }
+
+            if (prepareRequest == null)
+            {
+                throw new ArgumentNullException("prepareRequest");
+            }
+
+            return client.Post(url, prepareRequest, postData: null, isLongRunning: isLongRunning);
         }
     }
 }

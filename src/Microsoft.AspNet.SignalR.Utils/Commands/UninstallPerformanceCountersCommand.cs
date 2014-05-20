@@ -1,4 +1,7 @@
-﻿using System;
+﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+
+using System;
+using System.Globalization;
 
 namespace Microsoft.AspNet.SignalR.Utils
 {
@@ -12,12 +15,12 @@ namespace Microsoft.AspNet.SignalR.Utils
 
         public override string DisplayName
         {
-            get { return "Uninstall Performance Counters"; }
+            get { return String.Format(CultureInfo.CurrentCulture, Resources.Notify_UninstallPerformanceCounters); }
         }
 
         public override string Help
         {
-            get { return "Uninstalls SignalR performance counters."; }
+            get { return String.Format(CultureInfo.CurrentCulture, Resources.Notify_UninstallSignalRPerformanceCounters); }
         }
 
         public override string[] Names
@@ -30,7 +33,7 @@ namespace Microsoft.AspNet.SignalR.Utils
             var installer = new PerformanceCounterInstaller();
             installer.UninstallCounters();
 
-            Success("Performance counters uninstalled!");
+            Success(String.Format(CultureInfo.CurrentCulture, Resources.Notify_PerformanceCountersUninstalled));
         }
     }
 }
